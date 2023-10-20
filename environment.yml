@@ -1,0 +1,12 @@
+name: adversarial_test
+channels:
+  - pytorch
+  - nvidia
+dependencies:
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda==12.1
+  - pip
+  - pip:
+      - git+https://github.com/RobustBench/robustbench.git
