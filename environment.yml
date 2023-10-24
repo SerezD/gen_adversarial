@@ -7,6 +7,10 @@ dependencies:
   - torchvision
   - torchaudio
   - pytorch-cuda==12.1
+  - torchmetrics
+  - einops
+  - kornia
+  - matplotlib
   - pip
   - pip:
       - git+https://github.com/RobustBench/robustbench.git
