@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from .utils import one_hot
+from src.NVAE.original.utils import one_hot
 
 @torch.jit.script
 def soft_clamp5(x: torch.Tensor):

@@ -2,6 +2,7 @@ name: adversarial_test
 channels:
   - pytorch
   - nvidia
+  - conda-forge
 dependencies:
   - pytorch
   - torchvision
@@ -13,4 +14,6 @@ dependencies:
   - matplotlib
   - pip
   - pip:
+      - lmdb
+      - tensorboardX
       - git+https://github.com/RobustBench/robustbench.git

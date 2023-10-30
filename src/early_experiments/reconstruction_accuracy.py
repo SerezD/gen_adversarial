@@ -12,8 +12,8 @@ from robustbench import load_cifar10
 import os
 from matplotlib import pyplot as plt
 
-from NVAE.original.model import AutoEncoder
-from NVAE.original.utils import get_arch_cells, pre_process
+from src.NVAE.original.model import AutoEncoder
+from src.NVAE.original.utils import get_arch_cells, pre_process
 
 
 def main():
@@ -95,7 +95,25 @@ def main():
 
 if __name__ == '__main__':
 
-    CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/original.pt'
+    """
+    [ORIGINAL]
+    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.92330002784729
+    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9323999881744385
+    
+    [REPRODUCTION]
+    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9276999831199646
+    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9344000220298767
+    
+    [OURS_BASE]
+    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9049999713897705
+    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9218999743461609
+
+    [OURS_WEIGHTED]
+    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9039000272750854
+    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9218000173568726
+    """
+
+    CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/ours_weighted.pt'
     ADV_BASE_PATH = '/media/dserez/code/adversarial/'
     TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
     main()

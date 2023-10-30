@@ -7,7 +7,6 @@
 
 import argparse
 import torch
-import torch.nn as nn
 import numpy as np
 import os
 
@@ -173,10 +172,11 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             recon_loss = utils.reconstruction_loss(output, x, crop=model.crop_output)
             balanced_kl, kl_coeffs, kl_vals = utils.kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
 
-            nelbo_batch = recon_loss + balanced_kl
+            # TODO changed this adding non elbo weight!!
+            nelbo_batch = recon_loss + balanced_kl * args.non_elbo_weight
             loss = torch.mean(nelbo_batch)
-            norm_loss = model.spectral_norm_parallel()
-            bn_loss = model.batchnorm_loss()
+            norm_loss = model.spectral_norm_parallel() * args.non_elbo_weight
+            bn_loss = model.batchnorm_loss() * args.non_elbo_weight
             # get spectral regularization coefficient (lambda)
             if args.weight_decay_norm_anneal:
                 assert args.weight_decay_norm_init > 0 and args.weight_decay_norm > 0, 'init and final wdn should be positive.'
@@ -216,7 +216,8 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
                               'param_groups'][0]['lr'], global_step)
             writer.add_scalar('train/nelbo_iter', loss, global_step)
             writer.add_scalar('train/kl_iter', torch.mean(sum(kl_all)), global_step)
-            writer.add_scalar('train/recon_iter', torch.mean(utils.reconstruction_loss(output, x, crop=model.crop_output)), global_step)
+            writer.add_scalar('train/recon_iter', torch.mean(
+                utils.reconstruction_loss(output, x, crop=model.crop_output)), global_step)
             writer.add_scalar('kl_coeff/coeff', kl_coeff, global_step)
             total_active = 0
             for i, kl_diag_i in enumerate(kl_diag):
@@ -318,7 +319,7 @@ def test_vae_fid(model, args, total_fid_samples):
 def init_processes(rank, size, fn, args):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = args.master_address
-    os.environ['MASTER_PORT'] = '6020'
+    os.environ['MASTER_PORT'] = '6021'
     torch.cuda.set_device(args.local_rank)
     dist.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=size)
     fn(args)
@@ -331,6 +332,9 @@ def cleanup():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('encoder decoder examiner')
+
+    parser.add_argument('--non_elbo_weight', type=float, default=1.)
+
     # experimental results
     parser.add_argument('--root', type=str, default='/tmp/nasvae/expr',
                         help='location of the results')

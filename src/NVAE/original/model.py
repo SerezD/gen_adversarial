@@ -11,14 +11,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
-from .neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
-from .neural_ar_operations import ELUConv as ARELUConv
+from src.NVAE.original.neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
+from src.NVAE.original.neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
+from src.NVAE.original.neural_ar_operations import ELUConv as ARELUConv
 from torch.distributions.bernoulli import Bernoulli
 
-from .utils import get_stride_for_cell_type, get_input_size, groups_per_scale
-from .distributions import Normal, DiscMixLogistic, NormalDecoder
-from .thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
+from src.NVAE.original.utils import get_stride_for_cell_type, get_input_size, groups_per_scale
+from src.NVAE.original.distributions import Normal, DiscMixLogistic, NormalDecoder
+from src.NVAE.original.thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 CHANNEL_MULT = 2
 

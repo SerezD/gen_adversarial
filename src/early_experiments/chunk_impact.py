@@ -15,8 +15,8 @@ import os
 from tqdm import tqdm
 from matplotlib import pyplot as plt
 
-from NVAE.original.model import AutoEncoder
-from NVAE.original.utils import get_arch_cells, pre_process
+from src.NVAE.original.model import AutoEncoder
+from src.NVAE.original.utils import get_arch_cells, pre_process
 
 
 def main():

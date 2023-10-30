@@ -1,8 +1,8 @@
 import torch
 from torch import nn
-from torch.nn.utils import weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 
-from NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
+from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 
 class SE(nn.Module):
@@ -94,12 +94,12 @@ class ResidualCellEncoder(nn.Module):
 
         # (BN - SWISH) + conv 3x3 + (BN - SWISH) + conv 3x3 + SE
         # downsampling in the first conv, depending on stride
-        self.residual = nn.Sequential([
+        self.residual = nn.Sequential(
             SyncBatchNormSwish(in_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
             weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)),
             SyncBatchNormSwish(out_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
             weight_norm(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1))
-        ])
+        )
 
         if use_SE:
             self.residual.append(SE(out_channels, out_channels))
@@ -157,6 +157,20 @@ class ResidualCellDecoder(nn.Module):
         return skip + 0.1 * s
 
 
+class EncCombinerCell(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+
+        self.conv = weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=1))
+
+    def forward(self, x1, x2):
+
+        # TODO understand what x1, x2 are
+        x2 = self.conv(x2)
+        out = x1 + x2
+        return out
+
+
 class PreProcessing(nn.Module):
     def __init__(self, img_channels: int, out_channels: int, n_blocks: int, n_cells_per_block: int, use_SE: bool):
         """
@@ -211,91 +225,108 @@ class PreProcessing(nn.Module):
         normalized_images = (images * 2) - 1.0
         x = self.init_conv(normalized_images)
 
-        return self.preprocessing(x)
+        for b in range(self.n_blocks):
+            for c in range(self.n_cells_per_block):
+                x = self.preprocessing.get_submodule(f'block_{b}').get_submodule(f'cell_{c}')(x)
+        return x
 
 
 class Encoder(nn.Module):
 
-    def __init__(self, h_args: dict, e_args: dict, mult: int, use_SE: bool):
+    def __init__(self, ae_args, mult: int, use_SE: bool):
 
         super().__init__()
 
-        self.num_latent_scales = h_args['num_latent_scales']
-        self.num_groups_per_scale = h_args['num_groups_per_scale']
-        self.num_latent_per_group = h_args['num_latent_per_group']
-        self.groups_per_scale = [max(h_args['minimum_groups'], self.num_groups_per_scale // 2) if h_args['is_adaptive']
-                                 else self.num_groups_per_scale for _ in range(self.num_latent_scales)]
+        self.num_scales = ae_args['num_scales']
+        self.groups_per_scale = [
+            max(ae_args['min_groups_per_scale'], ae_args['num_groups_per_scale'] // 2)
+            if ae_args['is_adaptive'] else
+            ae_args['num_groups_per_scale']
+            for _ in range(self.num_scales)
+        ]  # different on each scale if is_adaptive
 
-        self.num_channels_enc = e_args['num_channels_enc']
-        self.num_preprocess_blocks = e_args['num_preprocess_blocks']
-        self.num_preprocess_cells = e_args['num_preprocess_cells']
-        self.num_cell_per_cond_enc = e_args['num_cell_per_cond_enc']
+        self.num_cells_per_group = ae_args['num_cells_per_group']
+        self.initial_channels = ae_args['initial_channels']
 
-        enc_tower = nn.ModuleList()
-        for scale in range(self.num_latent_scales):
-            for group in range(self.groups_per_scale[scale]):
-                for cell in range(self.num_cell_per_cond_enc):
+        self.encoder_tower = nn.ModuleList()
 
-                    num_c = int(self.num_channels_enc * mult)
-                    cell = ResidualCellEncoder(num_c, num_c, downsampling=False, use_SE=use_SE)
-                    enc_tower.append(cell)
+        # Each scale is a downsampling factor
+        # Each scale has n groups == latent variable at that resolution/scale
+        # Each group has n cells
 
-                # add encoder combiner
-                if not (scale == self.num_latent_scales - 1 and group == self.groups_per_scale[scale] - 1):
-                    num_ce = int(self.num_channels_enc * mult)
-                    num_cd = int(self.num_channels_dec * mult)
-                    cell = EncCombinerCell(num_ce, num_cd, num_ce, cell_type='combiner_enc')
-                    enc_tower.append(cell)
+        for s in range(self.num_scales):
 
-            # down cells after finishing a scale
-            if scale < self.num_latent_scales - 1:
-                arch = self.arch_instance['down_enc']
-                num_ci = int(self.num_channels_enc * mult)
-                num_co = int(CHANNEL_MULT * num_ci)
-                cell = Cell(num_ci, num_co, cell_type='down_enc', arch=arch, use_se=self.use_se)
-                enc_tower.append(cell)
-                mult = CHANNEL_MULT * mult
+            this_scale = nn.ModuleList()
+
+            # add groups
+            for g in range(self.groups_per_scale[s]):
+
+                this_group = nn.ModuleList()
+
+                # add cells for this group
+                for c in range(self.num_cells_per_group):
+
+                    channels = int(self.initial_channels * mult)
+                    cell = ResidualCellEncoder(channels, channels, downsampling=False, use_SE=use_SE)
+                    this_group.add_module(f'cell_{c}', cell)
+
+                # at the end of each group, except last group and scale, add combiner (for sampling z)
+                if not (s == self.num_scales - 1 and g == self.groups_per_scale[s] - 1):
+                    channels = int(self.initial_channels * mult)
+                    cell = EncCombinerCell(in_channels=channels, out_channels=channels)
+                    this_group.add_module(f'combiner', cell)
+
+                # in any case, add group to scale
+                this_scale.add_module(f'group_{g}', this_group)
+
+            # all groups added, add downsampling (except for last scale)
+            if s < self.num_scales - 1:
+
+                # cell with downsampling (double channels)
+                channels = int(self.initial_channels * mult)
+                cell = ResidualCellEncoder(channels, channels * 2, downsampling=True, use_SE=use_SE)
+                mult = mult * 2
+
+                this_scale.add_module('downsampling', cell)
+
+            self.encoder_tower.add_module(f'scale_{s}', this_scale)
+
+    def forward(self, x: torch.Tensor):
+
+        # TODO: run the main encoder tower
+        # here combiner cells refer to the + part (combine with decoder for z)
+        combiner_cells_enc = []
+        combiner_cells_s = []
+        for cell in self.encoder_tower:
+            if cell.cell_type == 'combiner_enc':
+                combiner_cells_enc.append(cell)
+                combiner_cells_s.append(x)
+            else:
+                x = cell(x)
+
+        # reverse combiner cells and their input for decoder
+        combiner_cells_enc.reverse()
+        combiner_cells_s.reverse()
+
+        return x, combiner_cells_enc, combiner_cells_s
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, h_args: dict, e_args: dict, use_SE: bool = True):
+    def __init__(self, ae_args: dict, use_SE: bool = True):
         """
-        :param h_args: hierarchical args
-        :param e_args: encoder args
+        :param ae_args: hierarchical args
         :param use_SE: use Squeeze and Excitation
         """
 
         super().__init__()
 
-        self.use_SE = use_SE  # weather to use the squeeze and excitation module
-        # self.writer = writer
-        # self.arch_instance = arch_instance
-        # self.dataset = args.dataset
-        # self.crop_output = self.dataset in {'mnist', 'omniglot', 'stacked_mnist'}
-        # self.res_dist = args.res_dist
-        # self.num_bits = args.num_x_bits
+        # structure
+        self.preprocess = PreProcessing(img_channels=3, out_channels=ae_args['initial_channels'],
+                                        n_blocks=ae_args['num_preprocess_blocks'],
+                                        n_cells_per_block=ae_args['num_preprocess_cells'], use_SE=use_SE)
 
-        # hierarchical params
-        self.num_latent_scales = h_args['num_latent_scales']
-        self.num_groups_per_scale = h_args['num_groups_per_scale']
-        self.num_latent_per_group = h_args['num_latent_per_group']
-
-        self.groups_per_scale = [max(h_args['minimum_groups'], self.num_groups_per_scale // 2) if h_args['is_adaptive']
-                                 else self.num_groups_per_scale for _ in range(self.num_latent_scales)]
-
-        # self.vanilla_vae = self.num_latent_scales == 1 and self.num_groups_per_scale == 1
-
-        # encoder params
-        self.num_channels_enc = e_args['num_channels_enc']
-        self.num_preprocess_blocks = e_args['num_preprocess_blocks']
-        self.num_preprocess_cells = e_args['num_preprocess_cells']
-        self.num_cell_per_cond_enc = e_args['num_cell_per_cond_enc']
-
-        # # decoder parameters
-        # self.num_channels_dec = args.num_channels_dec
-        # self.num_postprocess_blocks = args.num_postprocess_blocks
-        # self.num_postprocess_cells = args.num_postprocess_cells
-        # self.num_cell_per_cond_dec = args.num_cell_per_cond_dec  # number of cell for each conditional in decoder
+        multiplier = ae_args['num_preprocess_blocks']
+        self.encoder = Encoder(ae_args, multiplier, use_SE=use_SE)
 
     def forward(self, gt_images: torch.Tensor):
         """
@@ -304,25 +335,61 @@ class AutoEncoder(nn.Module):
         """
 
         # preprocessing phase
-
+        x = self.preprocess(gt_images)
 
         # encoding phase
 
         # decoding phase
 
         # postprocessing phase
-        return gt_images
+        return x
+
+
+# TODO THIS WILL BE TRAIN
+
+import os
+import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+def get_model_conf(filepath: str):
+    import yaml
+
+    # load params
+    with open(filepath, 'r', encoding='utf-8') as stream:
+        params = yaml.safe_load(stream)
+
+    return params
+
+
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def main(rank, world_size, config):
+
+    setup(rank, world_size)
+
+    # create model and move it to GPU with id rank
+    model = AutoEncoder(config['autoencoder']).to(rank)
+    ddp_model = DDP(model, device_ids=[rank])
+
+    img_batch = torch.rand((4, 3, 32, 32), device='cuda:0')
+    out = ddp_model(img_batch)
+
+    cleanup()
 
 
 if __name__ == '__main__':
-    def get_model_conf(filepath: str):
-        import yaml
 
-        # load params
-        with open(filepath, 'r', encoding='utf-8') as stream:
-            params = yaml.safe_load(stream)
+    mp.spawn(main, args=(1, get_model_conf('conf.yaml'), ))
 
-        return params
-
-    conf = get_model_conf('./conf.yaml')
-    test = AutoEncoder(conf['hierarchies'], conf['encoder'])
