@@ -1,151 +1,177 @@
 """
-. Plot some reconstructions with added noise on chunks
-. measure L2 and Linf differences
+. compute and save reconstructions turning off each single chunk
+. measure L2 Linf and SSIM
+. measure accuracies on resnet32 and vgg16
 """
 
 import torch
-from torchvision.utils import make_grid
 from torchmetrics import Accuracy
-from einops import rearrange, pack
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+from einops import pack
 from kornia.enhance import normalize
 
 from robustbench import load_cifar10
 
 import os
 from tqdm import tqdm
-from matplotlib import pyplot as plt
+import numpy as np
 
 from src.NVAE.original.model import AutoEncoder
 from src.NVAE.original.utils import get_arch_cells, pre_process
 
 
 def main():
-    # load nvae pretrained cifar10
-    checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
-
-    # get and update args
-    args = checkpoint['args']
-    args.num_mixture_dec = 10
-    args.batch_size = 100
-
-    # init model and load
-    arch_instance = get_arch_cells(args.arch_instance)
-    nvae = AutoEncoder(args, None, arch_instance)
-    nvae.load_state_dict(checkpoint['state_dict'], strict=False)
-    nvae = nvae.cuda().eval()
 
     # load cifar10
-    x_test, y_test = load_cifar10(n_examples=200, data_dir=ADV_BASE_PATH)
+    x_test, y_test = load_cifar10(data_dir=ADV_BASE_PATH)
     data_n = x_test.shape[0]
-    y_test = y_test.cuda()
+    x_test = x_test.cuda(DEV_0)
+
+    # LOAD IMAGES IF ALREADY COMPUTED
+    if os.path.exists(IMAGES_FILE):
+
+        all_recons = np.load(IMAGES_FILE)
+        all_recons = torch.tensor(all_recons)
+
+    else:
+        # go and compute!
+        # load nvae pretrained cifar10
+        checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
+
+        # get and update args
+        args = checkpoint['args']
+        args.num_mixture_dec = 10
+        args.batch_size = BATCH_SIZE
+
+        latents_per_group = args.num_latent_per_group
+        initial_res = 32  # CIFAR 10
+        scales = args.num_latent_scales
+        groups_per_scale = [
+                max(args.min_groups_per_scale, args.num_groups_per_scale // 2)
+                if args.ada_groups else
+                args.num_groups_per_scale
+                for _ in range(args.num_latent_scales)
+            ]  # different on each scale if is_adaptive
+
+        # init model and load
+        arch_instance = get_arch_cells(args.arch_instance)
+        nvae = AutoEncoder(args, None, arch_instance)
+        nvae.load_state_dict(checkpoint['state_dict'], strict=False)
+        nvae = nvae.cuda(DEV_0).eval()
+
+        # get all reconstructions and save them as single numpy vector
+        all_recons = torch.empty((0, 1 + sum(groups_per_scale), 3, initial_res, initial_res), device=f'cuda:{DEV_0}')
+
+        for b in tqdm(range(0, data_n, args.batch_size)):
+
+            batch_final = torch.empty((args.batch_size, 0, 3, initial_res, initial_res), device=f'cuda:{DEV_0}')
+
+            batch_x = x_test[b:b + args.batch_size].cuda(DEV_0)
+
+            # get simple batch reconstruction
+            with torch.no_grad():
+                logits = nvae.forward(pre_process(batch_x, args.num_x_bits))[0]
+                decoder = nvae.decoder_output(logits)
+                simple_recons = decoder.sample()
+            batch_final, _ = pack([batch_final, simple_recons.unsqueeze(1)], 'b * c h w')
+
+            for s in range(scales):
+
+                base_n = sum(groups_per_scale[:s])
+
+                for g in range(groups_per_scale[s]):
+
+                    with torch.no_grad():
+                        logits = nvae.my_forward(pre_process(batch_x, args.num_x_bits), chunk=base_n + g)
+                        decoder = nvae.decoder_output(logits)
+                        chunk_recons = decoder.sample()
+                    batch_final, _ = pack([batch_final, chunk_recons.unsqueeze(1)], 'b * c h w')
+
+            all_recons, _ = pack([all_recons, batch_final], '* n c h w')
+
+        # save
+        np.save(IMAGES_FILE, all_recons.cpu().numpy())
+
+    x_test = x_test.to(f'cuda:{DEV_1}')
+    all_recons, _ = pack([x_test.unsqueeze(1), all_recons.to(f'cuda:{DEV_1}')], 'b * c h w')
+
+    ssim = StructuralSimilarityIndexMeasure().to(f'cuda:{DEV_1}')
 
     # load classifiers pretrained cifar10
     os.environ["TORCH_HOME"] = TORCH_HOME
     resnet32 = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet32", pretrained=True)
-    resnet32 = resnet32.cuda().eval()
+    resnet32 = resnet32.cuda(DEV_1).eval()
     vgg16_bn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_vgg16_bn", pretrained=True)
-    vgg16_bn = vgg16_bn.cuda().eval()
+    vgg16_bn = vgg16_bn.cuda(DEV_1).eval()
 
     # measure accuracy.
-    accuracy = Accuracy(task="multiclass", num_classes=10, top_k=1).cuda()
+    accuracy = Accuracy(task="multiclass", num_classes=10, top_k=1).cuda(DEV_1)
+    y_test = y_test.cuda(DEV_1)
 
-    for sigma in [0.8, 1.2, 1.6, 2.0]:
+    errors = {}
+    accuracies = {}
 
-        # for each batch:
-        # reconstruct perturbing all 30 chunks (also case with no perturbations)
-        # try different values for sigma param
-        params = (0., sigma, 1.)
+    for i in range(all_recons.shape[1]):
 
-        # on each image, compute L2 and Linf losses w.r.t original image.
-        all_l2 = torch.empty((0, 32), device='cuda:0')
-        all_li = torch.empty((0, 32), device='cuda:0')
-        all_images = torch.empty((0, 32, 3, 32, 32), device='cuda:0')  # 0, n_chunks + rec + orig, c, h, w
+        if i > 0:
+            l2_error = torch.mean(torch.cdist(x_test, all_recons[:, i]).view(data_n, -1))
+            li_error = torch.mean(torch.cdist(x_test, all_recons[:, i], p=float('inf')).view(data_n, -1))
+            ssim_error = ssim(all_recons[:, i], x_test)
 
-        for b in tqdm(range(0, data_n, args.batch_size)):
-
-            batch_x = x_test[b:b + args.batch_size].cuda()
-            recons_batch = batch_x.unsqueeze(1)
-
-            # init losses
-            l2_batch = torch.zeros((args.batch_size, 1), device='cuda:0')
-            li_batch = torch.zeros((args.batch_size, 1), device='cuda:0')
-
-            for chunk in range(-1, 30):
-                # reconstruct cifar10 test set
-                with torch.no_grad():
-                    logits = nvae.my_forward(pre_process(batch_x, args.num_x_bits), chunk=chunk, params=params)
-                    decoder = nvae.decoder_output(logits)
-                    this_recons = decoder.sample()
-
-                recons_batch, _ = pack([recons_batch, this_recons.unsqueeze(1)], 'b * c h w')
-
-                # get errors
-                this_l2 = torch.mean(torch.cdist(batch_x, this_recons).view(args.batch_size, -1), dim=1).unsqueeze(1)
-                l2_batch, _ = pack([l2_batch, this_l2], 'b *')
-
-                this_li = torch.mean(torch.cdist(batch_x, this_recons, p=float('inf')).view(args.batch_size, -1),
-                                     dim=1).unsqueeze(1)
-                li_batch, _ = pack([li_batch, this_li], 'b *')
-
-            # add to all
-            all_l2, _ = pack([all_l2, l2_batch], '* n')
-            all_li, _ = pack([all_li, li_batch], '* n')
-            all_images, _ = pack([all_images, recons_batch], '* n c h w')
-
-            # plot
-            if b == 0:
-                imgs = rearrange(all_images[:20], 'b n c h w -> (b n) c h w')
-                imgs = make_grid(imgs, nrow=32).permute(1, 2, 0).cpu().numpy()
-                plt.imshow(imgs)
-                plt.axis(False)
-                plt.title(f'Single Chunks modification (CIFAR 10 Test set) - sigma = {sigma}')
-                plt.show()
-
-        # mean error per chunk: (max l2 = 0.5 - max linf = 8/255 = 0.03137
-        l2_mean_per_chunk = torch.mean(all_l2, dim=0).cpu().numpy()
-        li_mean_per_chunk = torch.mean(all_li, dim=0).cpu().numpy()
-        del all_l2
-        del all_li
-
-        print(f'mean L2 error on original, recons and single chunk perturbations: {l2_mean_per_chunk}')
-        print(f'mean Linf error on original, recons and single chunk perturbations: {li_mean_per_chunk}')
-
-        fig, (l, r) = plt.subplots(1, 2, figsize=(12, 8))
-        l.plot(l2_mean_per_chunk[2:])
-        l.set_title('mean L2 per chunk perturbation')
-        r.plot(li_mean_per_chunk[2:])
-        r.set_title('mean Linf per chunk perturbation')
-        fig.suptitle(f'SIGMA = {sigma}')
-        plt.show()
+            errors['recons' if i == 1 else f'chunk_{(all_recons.shape[1] - i) - 1}'] = {
+                'L2': l2_error.item(),
+                'Linf': li_error.item(),
+                'ssim': ssim_error.item()
+            }
+        else:
+            errors['clean'] = {
+                'L2': 0.0,
+                'Linf': 0.0,
+                'ssim': 1.0
+            }
 
         # measure accuracies
-        all_images = rearrange(all_images, 'b n c h w -> n b c h w')
 
-        for chunk in range(all_images.shape[0]):
-
-            this_images = normalize(all_images[chunk],
+        normalized_imgs = normalize(all_recons[:, i],
                                     mean=torch.tensor([0.507, 0.4865, 0.4409], device='cuda:0'),
                                     std=torch.tensor([0.2673, 0.2564, 0.2761], device='cuda:0'))
 
-            with torch.no_grad():
-                resnet_preds = torch.argmax(resnet32(this_images), dim=1)
-                vgg16_preds = torch.argmax(vgg16_bn(this_images), dim=1)
+        with torch.no_grad():
 
-                if chunk == 0:
-                    print(f"Resnet32 clean acc: {accuracy(resnet_preds, y_test)}")
-                    print(f"VGG16 clean acc: {accuracy(vgg16_preds, y_test)}")
+            # pred
+            resnet_preds = torch.argmax(resnet32(normalized_imgs), dim=1)
+            vgg16_preds = torch.argmax(vgg16_bn(normalized_imgs), dim=1)
 
-                elif chunk == 1:
-                    print(f"Resnet32 recons acc: {accuracy(resnet_preds, y_test)}")
-                    print(f"VGG16 recons acc: {accuracy(vgg16_preds, y_test)}")
+        if i == 0:
+            acc_key = 'clean'
+        elif i == 1:
+            acc_key = 'recons'
+        else:
+            acc_key = f'chunk_{(all_recons.shape[1] - i) - 1}'
 
-                else:
-                    print(f"Resnet32 chunk perturbed = {chunk - 2} acc: {accuracy(resnet_preds, y_test)}")
-                    print(f"VGG16 chunk perturbed = {chunk - 2} acc: {accuracy(vgg16_preds, y_test)}")
+        accuracies[acc_key] = {
+            'resnet32': accuracy(resnet_preds, y_test).item(),
+            'vgg16': accuracy(vgg16_preds, y_test).item()
+        }
+
+    print(errors)
+    print(accuracies)
 
 
 if __name__ == '__main__':
-    CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/original.pt'
-    ADV_BASE_PATH = '/media/dserez/code/adversarial/'
-    TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
+
+    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/ours_base.pt'
+    # ADV_BASE_PATH = '/media/dserez/code/adversarial/'
+    # TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
+    # IMAGES_FILE = f'{ADV_BASE_PATH}reconstructions_ours_base.npy'
+    # DEV_0, DEV_1 = [int(i) for i in os.getenv("CUDA_VISIBLE_DEVICES").split(',')]
+
+    CKPT_NVAE = '../media/ours_weighted.pt'
+    ADV_BASE_PATH = '../media/'
+    TORCH_HOME = '../media/cifar10/'
+    IMAGES_FILE = f'{ADV_BASE_PATH}reconstructions_ours_weighted.npy'
+    DEV_0, DEV_1 = 0, 0
+
+    BATCH_SIZE = 25
+
     main()

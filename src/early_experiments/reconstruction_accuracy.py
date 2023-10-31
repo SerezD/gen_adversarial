@@ -105,12 +105,12 @@ if __name__ == '__main__':
     VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9344000220298767
     
     [OURS_BASE]
-    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9049999713897705
-    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9218999743461609
+    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9059000015258789
+    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9196000099182129
 
     [OURS_WEIGHTED]
-    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9039000272750854
-    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9218000173568726
+    Resnet32 clean acc: 0.9301999807357788 - recons acc: 0.9204000234603882
+    VGG16 clean acc: 0.9340000152587891 - recons acc: 0.9283000230789185
     """
 
     CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/ours_weighted.pt'

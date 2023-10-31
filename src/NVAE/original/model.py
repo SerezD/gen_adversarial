@@ -451,9 +451,7 @@ class AutoEncoder(nn.Module):
         return logits, log_q, log_p, kl_all, kl_diag
 
     # ########################################################################################################
-    def my_forward(self, x: torch.Tensor, chunk: int, params: tuple):
-
-        mu, sigma, trunc = params
+    def my_forward(self, x: torch.Tensor, chunk: int):
 
         s = self.stem(2 * x - 1.0)
 
@@ -485,9 +483,7 @@ class AutoEncoder(nn.Module):
 
         # add noise
         if chunk == 0:
-            noise = truncnorm.rvs(-trunc, trunc, loc=mu, scale=sigma, size=z.shape).astype(np.float32)
-            device = z.device
-            z = torch.tensor(noise, device=device)
+            z = torch.zeros_like(z, device=z.device)
 
         # apply normalizing flows
         nf_offset = 0
@@ -518,9 +514,7 @@ class AutoEncoder(nn.Module):
 
                     # add noise
                     if chunk == idx_dec:
-                        noise = truncnorm.rvs(-trunc, trunc, loc=mu, scale=sigma, size=z.shape).astype(np.float32)
-                        device = z.device
-                        z = torch.tensor(noise, device=device)
+                        z = torch.zeros_like(z, device=z.device)
 
                     # apply NF
                     for n in range(self.num_flows):

@@ -14,6 +14,7 @@ dependencies:
   - matplotlib
   - pip
   - pip:
+      - tqdm
       - lmdb
       - tensorboardX
       - git+https://github.com/RobustBench/robustbench.git
