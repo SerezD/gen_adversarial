@@ -317,6 +317,41 @@ class Encoder(nn.Module):
         return x, combiner_cells_enc, combiner_cells_x
 
 
+# def init_encoder0(self, mult):
+#     num_c = int(self.num_channels_enc * mult)
+#     cell = nn.Sequential(
+#         nn.ELU(),
+#         Conv2D(num_c, num_c, kernel_size=1, bias=True),
+#         nn.ELU())
+#     return cell
+#
+# def init_normal_sampler(self, mult):
+#     enc_sampler, dec_sampler, nf_cells = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
+#     enc_kv, dec_kv, query = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
+#     for s in range(self.num_latent_scales):
+#         for g in range(self.groups_per_scale[self.num_latent_scales - s - 1]):
+#             # build mu, sigma generator for encoder
+#             num_c = int(self.num_channels_enc * mult)
+#             cell = Conv2D(num_c, 2 * self.num_latent_per_group, kernel_size=3, padding=1, bias=True)
+#             enc_sampler.append(cell)
+#             # build NF
+#             for n in range(self.num_flows):
+#                 arch = self.arch_instance['ar_nn']
+#                 num_c1 = int(self.num_channels_enc * mult)
+#                 num_c2 = 8 * self.num_latent_per_group  # use 8x features
+#                 nf_cells.append(PairedCellAR(self.num_latent_per_group, num_c1, num_c2, arch))
+#             if not (s == 0 and g == 0):  # for the first group, we use a fixed standard Normal.
+#                 num_c = int(self.num_channels_dec * mult)
+#                 cell = nn.Sequential(
+#                     nn.ELU(),
+#                     Conv2D(num_c, 2 * self.num_latent_per_group, kernel_size=1, padding=0, bias=True))
+#                 dec_sampler.append(cell)
+#
+#         mult = mult / CHANNEL_MULT
+#
+#     return enc_sampler, dec_sampler, nf_cells, enc_kv, dec_kv, query
+
+
 class AutoEncoder(nn.Module):
     def __init__(self, ae_args: dict, use_SE: bool = True):
         """
@@ -333,6 +368,10 @@ class AutoEncoder(nn.Module):
 
         multiplier = ae_args['num_preprocess_blocks']
         self.encoder = Encoder(ae_args, multiplier, use_SE=use_SE)
+
+        # self.enc0 = self.init_encoder0(mult)
+        # self.enc_sampler, self.dec_sampler, self.nf_cells, self.enc_kv, self.dec_kv, self.query = \
+        #     self.init_normal_sampler(mult)
 
     def forward(self, gt_images: torch.Tensor):
         """
