@@ -1,6 +1,6 @@
 autoencoder:
   num_scales: 3 # the number of downsamples in encoder tower (latent scales)
-  num_groups_per_scale: 1 # number of groups (latent variables) per scale
+  num_groups_per_scale: 2 # number of groups (latent variables) per scale
   is_adaptive: false # Settings this to true will set different number of groups per scale (starting by num groups per scale and div by 2, up to min groups_per_scale)
   min_groups_per_scale: 1 # the minimum number of groups per scale.
   num_latent_per_group: 32 # number of channels in group latent variables

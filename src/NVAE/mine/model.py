@@ -293,22 +293,28 @@ class Encoder(nn.Module):
 
     def forward(self, x: torch.Tensor):
 
-        # TODO: run the main encoder tower
         # here combiner cells refer to the + part (combine with decoder for z)
+        # TODO, can we remove combiner from here ?
         combiner_cells_enc = []
-        combiner_cells_s = []
-        for cell in self.encoder_tower:
-            if cell.cell_type == 'combiner_enc':
-                combiner_cells_enc.append(cell)
-                combiner_cells_s.append(x)
-            else:
-                x = cell(x)
+        combiner_cells_x = []
+
+        for s, scale in enumerate(self.encoder_tower):
+            for g in range(self.groups_per_scale[s]):
+                for c in range(self.num_cells_per_group):
+                    x = scale.get_submodule(f'group_{g}').get_submodule(f'cell_{c}')(x)
+
+                if any('combiner' in name for name, _ in scale.get_submodule(f'group_{g}').named_children()):
+                    combiner_cells_enc.append(scale.get_submodule(f'group_{g}').get_submodule(f'combiner'))
+                    combiner_cells_x.append(x)
+
+            if any('downsampling' in name for name, _ in scale.named_children()):
+                x = scale.get_submodule(f'downsampling')(x)
 
         # reverse combiner cells and their input for decoder
         combiner_cells_enc.reverse()
-        combiner_cells_s.reverse()
+        combiner_cells_x.reverse()
 
-        return x, combiner_cells_enc, combiner_cells_s
+        return x, combiner_cells_enc, combiner_cells_x
 
 
 class AutoEncoder(nn.Module):
@@ -338,6 +344,7 @@ class AutoEncoder(nn.Module):
         x = self.preprocess(gt_images)
 
         # encoding phase
+        x, combiner_cells_enc, combiner_cells_x = self.encoder(x)
 
         # decoding phase
 
