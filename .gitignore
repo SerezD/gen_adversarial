@@ -1,1 +1,12 @@
 /src/media/
+/gen_adversarial.egg-info/dependency_links.txt
+/.idea/gen_adversarial.iml
+/.idea/misc.xml
+/gen_adversarial.egg-info/PKG-INFO
+/.idea/inspectionProfiles/profiles_settings.xml
+/.idea/inspectionProfiles/Project_Default.xml
+/gen_adversarial.egg-info/SOURCES.txt
+/gen_adversarial.egg-info/top_level.txt
+/.idea/shelf/Uncommitted_changes_before_Update_at_02_11_23__08_14__Changes_.xml
+/.idea/vcs.xml
+/.idea/workspace.xml

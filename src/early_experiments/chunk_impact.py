@@ -160,7 +160,7 @@ def main():
 
 if __name__ == '__main__':
 
-    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/ours_base.pt'
+    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/ours_weighted.pt'
     # ADV_BASE_PATH = '/media/dserez/code/adversarial/'
     # TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
     # IMAGES_FILE = f'{ADV_BASE_PATH}reconstructions_ours_base.npy'

@@ -537,6 +537,111 @@ class AutoEncoder(nn.Module):
 
         return logits
 
+    def encode(self, x):
+
+        chunks = []
+
+        s = self.stem(2 * x - 1.0)
+
+        # perform pre-processing
+        for cell in self.pre_process:
+            s = cell(s)
+
+        # run the main encoder tower
+        # here combiner cells refer to the + part (combine with decoder for z)
+        combiner_cells_enc = []
+        combiner_cells_s = []
+        for cell in self.enc_tower:
+            if cell.cell_type == 'combiner_enc':
+                combiner_cells_enc.append(cell)
+                combiner_cells_s.append(s)
+            else:
+                s = cell(s)
+
+        # reverse combiner cells and their input for decoder
+        combiner_cells_enc.reverse()
+        combiner_cells_s.reverse()
+
+        idx_dec = 0
+        ftr = self.enc0(s)  # this reduces the channel dimension
+        param0 = self.enc_sampler[idx_dec](ftr)
+        mu_q, log_sig_q = torch.chunk(param0, 2, dim=1)
+        dist = Normal(mu_q, log_sig_q)  # for the first approx. posterior
+        z, _ = dist.sample()
+
+        chunks.append(z.view(z.shape[0], -1))
+
+        # apply normalizing flows
+        nf_offset = 0
+        for n in range(self.num_flows):
+            z, log_det = self.nf_cells[n](z, ftr)
+        nf_offset += self.num_flows
+
+        # To make sure we do not pass any deterministic features from x to decoder.
+        s = 0
+
+        idx_dec = 0
+        s = self.prior_ftr0.unsqueeze(0)
+        batch_size = z.size(0)
+        s = s.expand(batch_size, -1, -1, -1)
+        for cell in self.dec_tower:
+            if cell.cell_type == 'combiner_dec':
+                if idx_dec > 0:
+                    # form prior
+                    param = self.dec_sampler[idx_dec - 1](s)
+                    mu_p, log_sig_p = torch.chunk(param, 2, dim=1)
+
+                    # form encoder
+                    ftr = combiner_cells_enc[idx_dec - 1](combiner_cells_s[idx_dec - 1], s)
+                    param = self.enc_sampler[idx_dec](ftr)
+                    mu_q, log_sig_q = torch.chunk(param, 2, dim=1)
+                    dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q) if self.res_dist else Normal(mu_q, log_sig_q)
+                    z, _ = dist.sample()
+
+                    # add noise
+                    chunks.append(z.view(z.shape[0], -1))
+
+                    # apply NF
+                    for n in range(self.num_flows):
+                        z, log_det = self.nf_cells[nf_offset + n](z, ftr)
+                    nf_offset += self.num_flows
+
+                # 'combiner_dec'
+                s = cell(s, z)
+                idx_dec += 1
+            else:
+                s = cell(s)
+
+        return chunks
+
+    def decode(self, chunks: list):
+
+        # get initial z
+        z = chunks.pop(0)
+
+        idx_dec = 0
+        s = self.prior_ftr0.unsqueeze(0)
+        batch_size = z.size(0)
+        s = s.expand(batch_size, -1, -1, -1)
+        for cell in self.dec_tower:
+            if cell.cell_type == 'combiner_dec':
+                if idx_dec > 0:
+                    z = chunks.pop(0)
+
+                # 'combiner_dec'
+                s = cell(s, z)
+                idx_dec += 1
+            else:
+                s = cell(s)
+
+        if self.vanilla_vae:
+            s = self.stem_decoder(z)
+
+        for cell in self.post_process:
+            s = cell(s)
+
+        logits = self.image_conditional(s)
+        return logits
     # ########################################################################################################
 
     def sample(self, num_samples, t):
