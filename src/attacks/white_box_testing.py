@@ -1,30 +1,30 @@
-import os
 import argparse
-import warnings
+from kornia.enhance import Normalize
+import math
+from matplotlib import pyplot as plt
+import os
 
 import torch
-import torch.optim as optim
-import torch.distributed as dist
-import torch.multiprocessing as mp
-import torch.backends.cudnn as cudnn
-import torchvision.transforms
+from torch import optim
+from torch import distributed as dist
+from torch import multiprocessing as mp
+from torch.backends import cudnn
+from torchvision import transforms
 from torch.nn.parallel import DistributedDataParallel as ddp
-
-import math
-from kornia.enhance import Normalize
-import matplotlib.pyplot as plt
-
 from torch.utils.data import DistributedSampler, DataLoader
+
 from torchvision.datasets import CIFAR10
 from torchvision.utils import make_grid
-from torchmetrics import Accuracy
-from torchmetrics.image import StructuralSimilarityIndexMeasure
+from torchmetrics.functional import accuracy
+from torchmetrics.functional.image import structural_similarity_index_measure as ssim
+
 from tqdm import tqdm
 
 from src.attacks.latent_walkers import NonlinearWalker
-
 from src.NVAE.original.model import AutoEncoder
 from src.NVAE.original.utils import get_arch_cells
+
+import warnings
 
 
 def init_run():
@@ -119,13 +119,13 @@ def load_models(opt):
 
 
 def prepare_data(opt):
-    train_dataset = CIFAR10(root=opt.data_dir, train=True, transform=torchvision.transforms.ToTensor(), download=True)
+    train_dataset = CIFAR10(root=opt.data_dir, train=True, transform=transforms.ToTensor(), download=True)
     train_sampler = DistributedSampler(train_dataset, num_replicas=opt.world_size, rank=opt.rank,
                                        shuffle=True, drop_last=False)
     train_dataloader = DataLoader(train_dataset, batch_size=opt.batch_size, pin_memory=False, num_workers=0,
                                   drop_last=False, sampler=train_sampler)
 
-    test_dataset = CIFAR10(root=opt.data_dir, train=False, transform=torchvision.transforms.ToTensor(), download=True)
+    test_dataset = CIFAR10(root=opt.data_dir, train=False, transform=transforms.ToTensor(), download=True)
     test_sampler = DistributedSampler(test_dataset, num_replicas=opt.world_size, rank=opt.rank,
                                       shuffle=False, drop_last=False)
     test_dataloader = DataLoader(test_dataset, batch_size=opt.batch_size, pin_memory=False, num_workers=0,
@@ -134,11 +134,87 @@ def prepare_data(opt):
     return train_dataloader, test_dataloader
 
 
-def main(rank, world_size, opt):
+def train_step(opt, batch, cnn_preprocess, optimizer, models):
+    walker, cnn, nvae = models
 
+    optimizer.zero_grad()
+
+    # get x batch, chunks and gt (according to cnn)
+    x, _ = batch
+    x = x.to(opt.rank)
+    b, _, _, _ = x.shape
+
+    with torch.no_grad():
+        # prediction according to attacked CNN
+        gt = torch.argmax(cnn.module(cnn_preprocess(x)), dim=1)
+        chunks = nvae.module.encode(x)
+
+    # get adversarial chunks
+    adversarial_chunks = []
+    for i, c in enumerate(chunks):
+        adv_c = walker.module(c, i)
+        r = int(math.sqrt(adv_c.shape[1] // nvae.module.num_latent_per_group))
+        adversarial_chunks.append(adv_c.view(b, nvae.module.num_latent_per_group, r, r))
+
+    # decode to get adversarial images (need grad for backprop)
+    nvae_logits = nvae.module.decode(adversarial_chunks)
+    adversarial_samples = nvae.module.decoder_output(nvae_logits).sample()
+
+    # obtain cnn scores to minimize
+    scores = torch.softmax(cnn.module(adversarial_samples), dim=1)[torch.arange(b), gt]
+    loss_scores = - torch.log(1. - scores)
+
+    # loss recon TODO add an L2 term ?
+    loss_recon = 1. - ssim(adversarial_samples, x, reduction='none')
+
+    # final Loss TODO do we need some weights here ?
+    loss = torch.mean(loss_recon + loss_scores)
+
+    loss.backward()
+    optimizer.step()
+
+    return loss_scores, loss_recon
+
+
+def validation_step(opt, batch, preprocess_cnn, models):
+    walker, attacked_cnn, tested_cnn, nvae = models
+
+    # get x batch, chunks and gt (according to cnn)
+    x, y = batch
+    x = x.to(opt.rank)
+    gt = y.to(opt.rank)
+    b, _, _, _ = x.shape
+
+    with torch.no_grad():
+        # get gt prediction for CNNs
+        clean_labels_atk = torch.argmax(attacked_cnn.module(preprocess_cnn(x)), dim=1)
+        clean_labels_tst = torch.argmax(tested_cnn.module(preprocess_cnn(x)), dim=1)
+
+        # obtain adversaries
+        chunks = nvae.module.encode(x)
+        adversarial_chunks = []
+        for i, c in enumerate(chunks):
+            adv_c = walker.module(c, i)
+            r = int(math.sqrt(adv_c.shape[1] // nvae.module.num_latent_per_group))
+            adversarial_chunks.append(adv_c.view(b, nvae.module.num_latent_per_group, r, r))
+        nvae_logits = nvae.module.decode(adversarial_chunks)
+        adversarial_samples = nvae.module.decoder_output(nvae_logits).sample()
+
+        # get predictions for adversaries
+        adv_labels_atk = torch.argmax(attacked_cnn.module(preprocess_cnn(adversarial_samples)), dim=1)
+        adv_labels_tst = torch.argmax(tested_cnn.module(preprocess_cnn(adversarial_samples)), dim=1)
+
+    # send preds (B, 1) to rank 0
+    return torch.cat([gt.unsqueeze(1), clean_labels_atk.unsqueeze(1), adv_labels_atk.unsqueeze(1),
+                      clean_labels_tst.unsqueeze(1), adv_labels_tst.unsqueeze(1)], dim=1), adversarial_samples
+
+
+def main(rank, world_size, opt):
     # just to pass only opt as argument to methods
     opt.rank = rank
     opt.world_size = world_size
+
+    is_master = opt.rank == 0
 
     torch.cuda.set_device(opt.rank)
     setup(opt.rank, opt.world_size)
@@ -146,193 +222,132 @@ def main(rank, world_size, opt):
     # init models, dataset, criterion and optimizer
     nvae, walker, attacked_cnn, test_cnn = load_models(opt)
     train_dataloader, test_dataloader = prepare_data(opt)
-    criterion_reconstruction = StructuralSimilarityIndexMeasure(reduction="none").to(opt.rank)
     optimizer = optim.Adam(walker.parameters(), lr=opt.lr, betas=(opt.beta1, opt.beta2), weight_decay=opt.weight_decay)
 
-    # accuracy for validation
-    accuracy = Accuracy(task="multiclass", num_classes=10, top_k=1).to(opt.rank)
-    best_accuracy = 1.  # monitor to save model
-    preprocess = Normalize(mean=torch.tensor([0.507, 0.4865, 0.4409], device=opt.rank),
-                           std=torch.tensor([0.2673, 0.2564, 0.2761], device=opt.rank))
+    cnn_preprocess = Normalize(mean=torch.tensor([0.507, 0.4865, 0.4409], device=opt.rank),
+                               std=torch.tensor([0.2673, 0.2564, 0.2761], device=opt.rank))
 
-    # values to save for plotting
-    if opt.rank == 0:
+    # train loss values for final plot
+    train_scores_losses_all_iter = []
+    train_recons_losses_all_iter = []
 
-        # accuracies
-        atk_cnn_clean_acc = []
-        atk_cnn_adv_acc = []
-        tst_cnn_clean_acc = []
-        tst_cnn_adv_acc = []
-
-        # all losses (per iter)
-        scores_losses = []
-        recons_losses = []
+    # accuracies epoch values for final plot
+    atk_cnn_clean_acc_epoch = []
+    atk_cnn_adv_acc_epoch = []
+    tst_cnn_clean_acc_epoch = []
+    tst_cnn_adv_acc_epoch = []
 
     for epoch in range(opt.n_epochs):
 
-        if opt.rank == 0:
+        dist.barrier()
+        walker = walker.train()
+
+        if is_master:
             print(f'Epoch: {epoch} / {opt.n_epochs}')
 
-        # TRAIN LOOP
-        for batch_index, batch in enumerate(tqdm(train_dataloader)):
+        # Train loop:
+        for batch in tqdm(train_dataloader):
 
-            # get x batch, chunks and gt (according to cnn)
-            x, _ = batch
-            x = x.to(opt.rank)
-            b, _, size, size = x.shape
+            loss_scores, loss_recon = train_step(opt, batch, cnn_preprocess, optimizer, (walker, attacked_cnn, nvae))
 
-            with torch.no_grad():
-                gt = torch.argmax(attacked_cnn.module(preprocess(x)), dim=1)
-                chunks = nvae.module.encode(x)
+            # at each training iter: pass loss terms of every image to rank 0
+            if not is_master:
+                dist.gather(tensor=loss_scores.detach(), dst=0)
+                dist.gather(tensor=loss_recon.detach(), dst=0)
+            else:
 
-            optimizer.zero_grad()
+                collected_scores = [torch.zeros_like(loss_scores) for _ in range(world_size)]
+                collected_recon = [torch.zeros_like(loss_recon) for _ in range(world_size)]
 
-            # get adversarial chunks
-            adversarial_chunks = []
-            for i, c in enumerate(chunks):
-                adv_c = walker.module(c, i)
-                r = int(math.sqrt(adv_c.shape[1] // nvae.module.num_latent_per_group))
-                adversarial_chunks.append(adv_c.view(b, nvae.module.num_latent_per_group, r, r))
+                dist.gather(gather_list=collected_scores, tensor=loss_scores.detach())
+                dist.gather(gather_list=collected_recon, tensor=loss_recon.detach())
 
-            # decode to get adversarial images (need grad for backprop)
-            nvae_logits = nvae.module.decode(adversarial_chunks)
-            adversarial_samples = nvae.module.decoder_output(nvae_logits).sample()
+                # get full Batch mean losses for iteration.
+                iter_score_loss = f'{torch.mean(torch.cat(collected_scores, dim=0)).item():.3f}'
+                iter_recon_loss = f'{torch.mean(torch.cat(collected_recon, dim=0)).item():.3f}'
 
-            # obtain cnn scores to minimize
-            loss_scores = torch.softmax(attacked_cnn.module(adversarial_samples), dim=1)[torch.arange(b), gt]
-            loss_recon = 1. - criterion_reconstruction(adversarial_samples, x)
-            loss = torch.mean(loss_recon + loss_scores)
-            loss.backward()
-            optimizer.step()
+                # save every loss value for final plot.
+                train_scores_losses_all_iter.append(iter_score_loss)
+                train_recons_losses_all_iter.append(iter_recon_loss)
 
-        if opt.rank == 0:
-            collected_scores = [torch.zeros_like(loss_scores) for _ in range(world_size)]
-            dist.gather(gather_list=collected_scores, tensor=loss_scores)
-            collected_recon = [torch.zeros_like(loss_recon) for _ in range(world_size)]
-            dist.gather(gather_list=collected_recon, tensor=loss_recon)
-
-        else:
-            dist.gather(tensor=loss_scores, dst=0)
-            dist.gather(tensor=loss_recon, dst=0)
-
-        if opt.rank == 0:
-            epoch_score = torch.mean(torch.cat(collected_scores, dim=0)).item()
-            epoch_recon = torch.mean(torch.cat(collected_recon, dim=0)).item()
-
-            print(f'mean Loss (scores): {epoch_score}')
-            print(f'mean Loss (recons): {epoch_recon}')
-
-            scores_losses.append(epoch_score)
-            recons_losses.append(epoch_recon)
-
-        # ###########################################################################################################
-        if opt.rank == 0:
-            print(f'Train Done. Validating now!')
+        if is_master:
+            print(f'last loss value (scores): {train_scores_losses_all_iter[-1]}')
+            print(f'last loss value (recons): {train_recons_losses_all_iter[-1]}')
+            print(f'Training Epoch Done. Validating now!')
 
         # sync all before test step
         dist.barrier()
+        # ############################################################################################################
 
-        with torch.no_grad():
+        walker = walker.eval()
 
-            walker = walker.eval()
+        # label predictions (for computing epoch/accuracy)
+        epoch_gt = torch.empty((0, 1), device=opt.rank)
+        epoch_clean_atk = torch.empty((0, 1), device=opt.rank)
+        epoch_adv_atk = torch.empty((0, 1), device=opt.rank)
+        epoch_clean_tst = torch.empty((0, 1), device=opt.rank)
+        epoch_adv_tst = torch.empty((0, 1), device=opt.rank)
 
-            # load predictions to compute Accuracy at epoch end
-            if opt.rank == 0:
-                epoch_gt = torch.empty((0, 1), device=opt.rank)
-                epoch_clean_atk = torch.empty((0, 1), device=opt.rank)
-                epoch_adv_atk = torch.empty((0, 1), device=opt.rank)
-                epoch_clean_tst = torch.empty((0, 1), device=opt.rank)
-                epoch_adv_tst = torch.empty((0, 1), device=opt.rank)
+        # Validation loop:
+        for batch_index, batch in enumerate(tqdm(test_dataloader)):
 
-            for batch_index, batch in enumerate(tqdm(test_dataloader)):
+            b, _, _, _ = batch[0].shape
 
-                # get x batch, chunks and gt (according to cnn)
-                x, y = batch
-                x = x.to(opt.rank)
-                gt = y.to(opt.rank)
-                b, _, size, size = x.shape
+            step_preds, adv_samples = validation_step(opt, batch, cnn_preprocess,
+                                                      (walker, attacked_cnn, test_cnn, nvae))
 
-                clean_labels_atk = torch.argmax(attacked_cnn.module(preprocess(x)), dim=1)
-                clean_labels_tst = torch.argmax(test_cnn.module(preprocess(x)), dim=1)
+            if not is_master:
+                dist.gather(dst=0, tensor=step_preds)
+            else:
+                all_step_preds = [torch.zeros((b, 5), dtype=torch.int64).to(opt.rank) for _ in range(world_size)]
+                dist.gather(gather_list=all_step_preds, tensor=step_preds)
 
-                # obtain adversaries
-                chunks = nvae.module.encode(x)
-                adversarial_chunks = []
-                for i, c in enumerate(chunks):
-                    adv_c = walker.module(c, i)
-                    r = int(math.sqrt(adv_c.shape[1] // nvae.module.num_latent_per_group))
-                    adversarial_chunks.append(adv_c.view(b, nvae.module.num_latent_per_group, r, r))
-                nvae_logits = nvae.module.decode(adversarial_chunks)
-                adversarial_samples = nvae.module.decoder_output(nvae_logits).sample()
+                # (GLOBAL BS, 5)
+                all_step_preds = torch.cat(all_step_preds, dim=0)
 
-                adv_labels_atk = torch.argmax(attacked_cnn.module(preprocess(adversarial_samples)), dim=1)
-                adv_labels_tst = torch.argmax(test_cnn.module(preprocess(adversarial_samples)), dim=1)
+                # append iter predictions to epoch predictions
+                epoch_gt = torch.cat([epoch_gt, all_step_preds[:, 0].unsqueeze(1)])
+                epoch_clean_atk = torch.cat([epoch_clean_atk, all_step_preds[:, 1].unsqueeze(1)])
+                epoch_adv_atk = torch.cat([epoch_adv_atk, all_step_preds[:, 2].unsqueeze(1)])
+                epoch_clean_tst = torch.cat([epoch_clean_tst, all_step_preds[:, 3].unsqueeze(1)])
+                epoch_adv_tst = torch.cat([epoch_adv_tst, all_step_preds[:, 4].unsqueeze(1)])
 
-                # send preds to rank 0
-                tensor_final = torch.cat(
-                                    [gt.unsqueeze(1),
-                                     clean_labels_atk.unsqueeze(1),
-                                     adv_labels_atk.unsqueeze(1),
-                                     clean_labels_tst.unsqueeze(1),
-                                     adv_labels_tst.unsqueeze(1)], dim=1)
-                if opt.rank == 0:
-                    all_preds = [torch.zeros((b, 5), dtype=torch.int64).to(opt.rank) for _ in range(world_size)]
-                    dist.gather(gather_list=all_preds, tensor=tensor_final)
-                else:
-                    dist.gather(dst=0, tensor=tensor_final)
+            # save images across epochs
+            if is_master and batch_index == 0:
+                plt.imshow(
+                    make_grid(
+                        torch.cat([batch[0][:8].to(opt.rank), adv_samples[:8]], dim=0)
+                    ).permute(1, 2, 0).cpu().numpy())
+                plt.savefig(f'{opt.plots_folder}/samples_ep{epoch:02d}.png')
+                plt.close()
 
-                # collect preds and append
-                if opt.rank == 0:
-                    all_preds = torch.cat(all_preds, dim=0)
-                    epoch_gt = torch.cat([epoch_gt, all_preds[:, 0].unsqueeze(1)])
-                    epoch_clean_atk = torch.cat([epoch_clean_atk, all_preds[:, 1].unsqueeze(1)])
-                    epoch_adv_atk = torch.cat([epoch_adv_atk, all_preds[:, 2].unsqueeze(1)])
-                    epoch_clean_tst = torch.cat([epoch_clean_tst, all_preds[:, 3].unsqueeze(1)])
-                    epoch_adv_tst = torch.cat([epoch_adv_tst, all_preds[:, 4].unsqueeze(1)])
+        # compute epoch accuracy, add for final plot and save model.
+        if is_master:
+            num_classes =int(torch.max(epoch_gt).item()) + 1
+            clean_acc_atk = accuracy(epoch_clean_atk, epoch_gt, task='multiclass', num_classes=num_classes)
+            adv_acc_atk = accuracy(epoch_adv_atk, epoch_gt, task='multiclass', num_classes=num_classes)
+            clean_acc_tst = accuracy(epoch_clean_tst, epoch_gt, task='multiclass', num_classes=num_classes)
+            adv_acc_tst = accuracy(epoch_adv_tst, epoch_gt, task='multiclass', num_classes=num_classes)
 
-                # save images across epochs
-                if opt.rank == 0 and batch_index == 0:
-                    plt.imshow(
-                        make_grid(
-                            torch.cat([x[:8], adversarial_samples[:8]], dim=0)
-                        ).permute(1, 2, 0).detach().cpu().numpy())
-                    plt.savefig(f'{opt.plots_folder}/samples_ep{epoch:.2f}.png')
-                    plt.close()
+            atk_cnn_clean_acc_epoch.append(f'{clean_acc_atk.item():.3f}')
+            atk_cnn_adv_acc_epoch.append(f'{adv_acc_atk.item():.3f}')
+            tst_cnn_clean_acc_epoch.append(f'{clean_acc_tst.item():.3f}')
+            tst_cnn_adv_acc_epoch.append(f'{adv_acc_tst.item():.3f}')
 
-            if opt.rank == 0:
-
-                clean_acc_atk = accuracy(epoch_clean_atk, epoch_gt)
-                adv_acc_atk = accuracy(epoch_adv_atk, epoch_gt)
-                clean_acc_tst = accuracy(epoch_clean_tst, epoch_gt)
-                adv_acc_tst = accuracy(epoch_adv_tst, epoch_gt)
-
-                atk_cnn_clean_acc.append(clean_acc_atk.item())
-                atk_cnn_adv_acc.append(adv_acc_atk.item())
-                tst_cnn_clean_acc.append(clean_acc_tst.item())
-                tst_cnn_adv_acc.append(adv_acc_tst.item())
-
-                if adv_acc_atk < best_accuracy:
-                    #best_accuracy = adv_acc_atk
-
-                    # saving model
-                    torch.save(walker.state_dict(), f'{opt.ckpt_folder}/ep_{epoch:.2f}')
-
-            walker = walker.train()
-
-        # sync all before new epoch
-        dist.barrier()
+            # saving model
+            torch.save(walker.state_dict(), f'{opt.ckpt_folder}/ep_{epoch:02d}.pt')
 
     # save final plots
-    if opt.rank == 0:
+    if is_master:
 
         # Losses Plot
         fig, [scores, recons] = plt.subplots(1, 2, figsize=(12, 8))
-        scores.plot(scores_losses)
+        scores.plot(train_scores_losses_all_iter)
         scores.set_title('Training Loss - Scores')
         scores.set_xlabel('epochs')
         scores.set_ylabel('loss')
 
-        recons.plot(recons_losses)
+        recons.plot(train_recons_losses_all_iter)
         recons.set_title('Training Loss - Recons')
         recons.set_xlabel('epochs')
         recons.set_ylabel('loss')
@@ -342,14 +357,14 @@ def main(rank, world_size, opt):
 
         # Test accuracy plot
         fig, [atk, tst] = plt.subplots(1, 2, figsize=(12, 8))
-        atk.plot(atk_cnn_clean_acc, c='blue')
-        atk.plot(atk_cnn_adv_acc, c='orange')
+        atk.plot(atk_cnn_clean_acc_epoch, c='blue')
+        atk.plot(atk_cnn_adv_acc_epoch, c='orange')
         atk.set_title('Resnet 32 - Attacked')
         atk.set_xlabel('Epochs')
         atk.set_ylabel('Accuracy (Top-1)')
 
-        blue, = tst.plot(tst_cnn_clean_acc, c='blue')
-        orange, = tst.plot(tst_cnn_adv_acc, c='orange')
+        blue, = tst.plot(tst_cnn_clean_acc_epoch, c='blue')
+        orange, = tst.plot(tst_cnn_adv_acc_epoch, c='orange')
         tst.set_title('VGG 16 - Tested')
         tst.set_xlabel('Epochs')
         tst.set_ylabel('Accuracy (Top-1)')
@@ -368,4 +383,8 @@ if __name__ == '__main__':
 
     cudnn.benchmark = True
 
-    mp.spawn(main, args=(w_size, init_run()), nprocs=w_size)
+    try:
+        mp.spawn(main, args=(w_size, init_run()), nprocs=w_size)
+    except KeyboardInterrupt as k_int:
+        print('Detected Keyboard Interrupt! Attempting to kill all processes')
+        dist.destroy_process_group()
