@@ -5,6 +5,7 @@ from matplotlib import pyplot as plt
 import os
 
 import torch
+import numpy as np
 from torch import optim
 from torch import distributed as dist
 from torch import multiprocessing as mp
@@ -37,7 +38,7 @@ def init_run():
     parser.add_argument('--data_dir', type=str,
                         default='/media/dserez/code/adversarial/')
 
-    parser.add_argument('--n_epochs', type=int, default=10)
+    parser.add_argument('--n_epochs', type=int, default=5)
     parser.add_argument('--img_size', type=int, default=32)
 
     parser.add_argument('--save_folder', type=str, default='./walker_runs')
@@ -142,17 +143,17 @@ def train_step(opt, batch, cnn_preprocess, optimizer, models):
     # get x batch, chunks and gt (according to cnn)
     x, _ = batch
     x = x.to(opt.rank)
-    b, _, _, _ = x.shape
+    b, c, h, w = x.shape
 
     with torch.no_grad():
         # prediction according to attacked CNN
-        gt = torch.argmax(cnn.module(cnn_preprocess(x)), dim=1)
+        top2_labels = torch.topk(cnn.module(cnn_preprocess(x)), k=2, dim=1).indices
         chunks = nvae.module.encode(x)
 
     # get adversarial chunks
     adversarial_chunks = []
-    for i, c in enumerate(chunks):
-        adv_c = walker.module(c, i)
+    for i, chunk in enumerate(chunks):
+        adv_c = walker.module(chunk, i)
         r = int(math.sqrt(adv_c.shape[1] // nvae.module.num_latent_per_group))
         adversarial_chunks.append(adv_c.view(b, nvae.module.num_latent_per_group, r, r))
 
@@ -161,14 +162,41 @@ def train_step(opt, batch, cnn_preprocess, optimizer, models):
     adversarial_samples = nvae.module.decoder_output(nvae_logits).sample()
 
     # obtain cnn scores to minimize
-    scores = torch.softmax(cnn.module(adversarial_samples), dim=1)[torch.arange(b), gt]
-    loss_scores = - torch.log(1. - scores)
+    atk_preds = torch.softmax(cnn.module(cnn_preprocess(adversarial_samples)), dim=1)
+    best_scores = atk_preds[torch.arange(b), top2_labels[:, 0]]
 
-    # loss recon TODO add an L2 term ?
-    loss_recon = 1. - ssim(adversarial_samples, x, reduction='none')
+    # Tried Losses
+    loss_scores = - torch.log(1. - best_scores * 0.99)  # minimize gt score (0.9 to avoid initial inf value)
 
-    # final Loss TODO do we need some weights here ?
-    loss = torch.mean(loss_recon + loss_scores)
+    # minimize best and maximize second best
+    # second_best_scores = atk_preds[torch.arange(b), top2_labels[:, 1]]
+    # loss_scores = - 0.5 * torch.log(1. - best_scores) - 0.5 * torch.log(second_best_scores)
+
+    # KL divergence with uniform probability ?
+    # NOTE: KL(preds(x), uniform(x)) = sum_x (preds(x) * log(preds(x) / uniform(x)))
+    # n_classes = 10
+    # loss_scores = torch.sum(atk_preds * torch.log(atk_preds * n_classes + 1e-10), dim=1)
+
+    # TODO next things to try
+    # ??
+
+    # loss reconstruction
+
+    # Tried Losses
+    # loss_recon = 1. - ssim(adversarial_samples, x, reduction='none')  # original (simply 1 - ssim)
+    # loss_recon = - torch.log(ssim(adversarial_samples, x, reduction='none'))  # log to get smoother loss
+    loss_recon = torch.mean((x - adversarial_samples).pow(2).view(b, -1), dim=1)  # L2 loss
+
+    # L2 + SSIM
+    # ssim_comp = - torch.log(ssim(adversarial_samples, x, reduction='none'))
+    # l2_comp = torch.mean(torch.pow(x - adversarial_samples, 2).view(b, -1), dim=1)
+    # loss_recon = ssim_comp * .9 + l2_comp *.1
+
+    # TODO next things to try
+    # ???
+
+    # final Loss
+    loss = torch.mean(.6 * loss_recon + .4 * loss_scores)
 
     loss.backward()
     optimizer.step()
@@ -227,9 +255,9 @@ def main(rank, world_size, opt):
     cnn_preprocess = Normalize(mean=torch.tensor([0.507, 0.4865, 0.4409], device=opt.rank),
                                std=torch.tensor([0.2673, 0.2564, 0.2761], device=opt.rank))
 
-    # train loss values for final plot
-    train_scores_losses_all_iter = []
-    train_recons_losses_all_iter = []
+    # train loss values for final plot (mean per each epoch)
+    train_scores_loss_epoch = []
+    train_recons_loss_epoch = []
 
     # accuracies epoch values for final plot
     atk_cnn_clean_acc_epoch = []
@@ -244,6 +272,10 @@ def main(rank, world_size, opt):
 
         if is_master:
             print(f'Epoch: {epoch} / {opt.n_epochs}')
+
+        # reset each epoch
+        train_scores_loss_iter = []
+        train_recons_loss_iter = []
 
         # Train loop:
         for batch in tqdm(train_dataloader):
@@ -263,16 +295,28 @@ def main(rank, world_size, opt):
                 dist.gather(gather_list=collected_recon, tensor=loss_recon.detach())
 
                 # get full Batch mean losses for iteration.
-                iter_score_loss = f'{torch.mean(torch.cat(collected_scores, dim=0)).item():.3f}'
-                iter_recon_loss = f'{torch.mean(torch.cat(collected_recon, dim=0)).item():.3f}'
+                iter_score_loss = torch.mean(torch.cat(collected_scores, dim=0)).item()
+                iter_recon_loss = torch.mean(torch.cat(collected_recon, dim=0)).item()
+
+                if math.isnan(iter_score_loss) or math.isnan(iter_recon_loss):
+                    print(f'NAN VALUE FOUND: scores = {iter_score_loss} ; recons  = {iter_recon_loss}')
+                    print(f'LAST score losses: {train_scores_loss_iter}')
+                    print(f'LAST recon losses: {train_recons_loss_iter}')
 
                 # save every loss value for final plot.
-                train_scores_losses_all_iter.append(iter_score_loss)
-                train_recons_losses_all_iter.append(iter_recon_loss)
+                train_scores_loss_iter.append(iter_score_loss)
+                train_recons_loss_iter.append(iter_recon_loss)
 
         if is_master:
-            print(f'last loss value (scores): {train_scores_losses_all_iter[-1]}')
-            print(f'last loss value (recons): {train_recons_losses_all_iter[-1]}')
+
+            mean_score_loss = sum(train_scores_loss_iter) / len(train_scores_loss_iter)
+            mean_recon_loss = sum(train_recons_loss_iter) / len(train_recons_loss_iter)
+
+            train_scores_loss_epoch.append(mean_score_loss)
+            train_recons_loss_epoch.append(mean_recon_loss)
+
+            print(f'last loss value (scores): {mean_score_loss:.3f}')
+            print(f'last loss value (recons): {mean_recon_loss:.3f}')
             print(f'Training Epoch Done. Validating now!')
 
         # sync all before test step
@@ -314,25 +358,32 @@ def main(rank, world_size, opt):
 
             # save images across epochs
             if is_master and batch_index == 0:
+                l2_val = torch.mean((batch[0].to(opt.rank) - adv_samples).pow(2).view(-1)).item()
+                ssim_val = ssim(batch[0].to(opt.rank), adv_samples).item()
+
                 plt.imshow(
                     make_grid(
                         torch.cat([batch[0][:8].to(opt.rank), adv_samples[:8]], dim=0)
                     ).permute(1, 2, 0).cpu().numpy())
+                plt.title(f'L2: {l2_val:.4f} - SSIM: {ssim_val:.3f}')
                 plt.savefig(f'{opt.plots_folder}/samples_ep{epoch:02d}.png')
                 plt.close()
 
         # compute epoch accuracy, add for final plot and save model.
         if is_master:
-            num_classes =int(torch.max(epoch_gt).item()) + 1
+            num_classes = int(torch.max(epoch_gt).item()) + 1
             clean_acc_atk = accuracy(epoch_clean_atk, epoch_gt, task='multiclass', num_classes=num_classes)
             adv_acc_atk = accuracy(epoch_adv_atk, epoch_gt, task='multiclass', num_classes=num_classes)
             clean_acc_tst = accuracy(epoch_clean_tst, epoch_gt, task='multiclass', num_classes=num_classes)
             adv_acc_tst = accuracy(epoch_adv_tst, epoch_gt, task='multiclass', num_classes=num_classes)
 
-            atk_cnn_clean_acc_epoch.append(f'{clean_acc_atk.item():.3f}')
-            atk_cnn_adv_acc_epoch.append(f'{adv_acc_atk.item():.3f}')
-            tst_cnn_clean_acc_epoch.append(f'{clean_acc_tst.item():.3f}')
-            tst_cnn_adv_acc_epoch.append(f'{adv_acc_tst.item():.3f}')
+            print(f'Clean CNN Accuracy: {clean_acc_atk} - Adversarial CNN Accuracy {adv_acc_atk}')
+            print('#' * 30)
+
+            atk_cnn_clean_acc_epoch.append(clean_acc_atk.item())
+            atk_cnn_adv_acc_epoch.append(adv_acc_atk.item())
+            tst_cnn_clean_acc_epoch.append(clean_acc_tst.item())
+            tst_cnn_adv_acc_epoch.append(adv_acc_tst.item())
 
             # saving model
             torch.save(walker.state_dict(), f'{opt.ckpt_folder}/ep_{epoch:02d}.pt')
@@ -342,15 +393,24 @@ def main(rank, world_size, opt):
 
         # Losses Plot
         fig, [scores, recons] = plt.subplots(1, 2, figsize=(12, 8))
-        scores.plot(train_scores_losses_all_iter)
+        scores.plot(train_scores_loss_epoch)
         scores.set_title('Training Loss - Scores')
         scores.set_xlabel('epochs')
         scores.set_ylabel('loss')
 
-        recons.plot(train_recons_losses_all_iter)
+        min_v, max_v = min(train_scores_loss_epoch), max(train_scores_loss_epoch)
+        step = (max_v - min_v) / 20
+        y_values = list(np.arange(min_v, max_v + step, step))
+        scores.set_yticks(y_values, [f'{n:.3f}' for n in y_values])
+
+        recons.plot(train_recons_loss_epoch)
         recons.set_title('Training Loss - Recons')
         recons.set_xlabel('epochs')
         recons.set_ylabel('loss')
+        min_v, max_v = min(train_recons_loss_epoch), max(train_recons_loss_epoch)
+        step = (max_v - min_v) / 20
+        y_values = list(np.arange(min_v, max_v + step, step))
+        recons.set_yticks(y_values, [f'{n:.3f}' for n in y_values])
 
         plt.savefig(f'{opt.plots_folder}/train_loss.png')
         plt.close()
