@@ -1,5 +1,4 @@
 import math
-import os
 from collections import OrderedDict
 
 import torch
@@ -12,6 +11,10 @@ from src.attacks.latent_walkers import NonlinearWalker
 
 
 def main():
+    """
+    What is the mean distance from origin before and after perturbation for each single chunk ?
+
+    """
 
     # load nvae pretrained cifar10
     checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
@@ -68,7 +71,7 @@ def main():
 
             # get adversarial chunks
             adversarial_chunks = []
-            l2_dist_vector = torch.empty((BATCH_SIZE, 0, 1), device='cuda')
+            dist_vector = torch.empty((BATCH_SIZE, 0, 1), device='cuda')
 
             for i, c in enumerate(chunks):
                 adv_c = nn_walker(c, i)
@@ -76,10 +79,13 @@ def main():
                 adversarial_chunks.append(adv_c.view(BATCH_SIZE, nvae.num_latent_per_group, r, r))
 
                 # compute L2 distance
-                l2_dist = torch.cdist(c, adv_c, p=2).diag().view(-1, 1, 1)
-                l2_dist_vector, _ = pack([l2_dist_vector, l2_dist], 'b * d')
+                origin_dist_clean = torch.cdist(c, torch.zeros_like(c, device='cuda'), p=2).diag().view(-1, 1, 1)
+                origin_dist_adver = torch.cdist(adv_c, torch.zeros_like(adv_c, device='cuda'), p=2).diag().view(-1, 1, 1)
 
-            test_set_noise, _ = pack([test_set_noise, l2_dist_vector], '* n d')
+                dist = origin_dist_adver - origin_dist_clean
+                dist_vector, _ = pack([dist_vector, dist], 'b * d')
+
+            test_set_noise, _ = pack([test_set_noise, dist_vector], '* n d')
 
 
             # decode to get adversarial images (need grad for backprop)
@@ -99,10 +105,11 @@ def main():
             print('\\midrule')
     print('\\bottomrule')
 
+
 if __name__ == '__main__':
 
     CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/ours_weighted.pt'
-    CKPT_WALKER = './walker_runs/ckpts/log_best_score_ssim_l2_recon_weighted/last.pt'
+    CKPT_WALKER = './walker_runs/ckpts/log_best_score_l2_recon_weighted/last.pt'
     ADV_BASE_PATH = '/media/dserez/code/adversarial/'
     TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
 

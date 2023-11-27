@@ -38,6 +38,9 @@ def init_run():
     parser.add_argument('--data_dir', type=str,
                         default='/media/dserez/code/adversarial/')
 
+    parser.add_argument('--chunks_to_perturb', type=int, default=None, nargs='+',
+                        help='indices of chunks to perturb, starting from 0')
+
     parser.add_argument('--n_epochs', type=int, default=5)
     parser.add_argument('--img_size', type=int, default=32)
 
@@ -104,7 +107,7 @@ def load_models(opt):
 
     # Walker
     nn_walker = NonlinearWalker(n_chunks=sum(nvae.module.groups_per_scale), chunk_size=chunk_size,
-                                init_weights=True)
+                                to_perturb=opt.chunks_to_perturb, init_weights=True)
     nn_walker = ddp(nn_walker.to(opt.rank), device_ids=[opt.rank])
 
     # Attacked CNN
@@ -165,38 +168,18 @@ def train_step(opt, batch, cnn_preprocess, optimizer, models):
     atk_preds = torch.softmax(cnn.module(cnn_preprocess(adversarial_samples)), dim=1)
     best_scores = atk_preds[torch.arange(b), top2_labels[:, 0]]
 
-    # Tried Losses
-    loss_scores = - torch.log(1. - best_scores * 0.99)  # minimize gt score (0.9 to avoid initial inf value)
+    # LOSSES
+    # minimize best and maximize second best (both are bounded in 0__1 range)
+    second_best_scores = atk_preds[torch.arange(b), top2_labels[:, 1]]
+    loss_scores = (- torch.log10(1. - 0.9 * best_scores) - torch.log10(second_best_scores * 0.9 + 0.1)) * 0.5
 
-    # minimize best and maximize second best
-    # second_best_scores = atk_preds[torch.arange(b), top2_labels[:, 1]]
-    # loss_scores = - 0.5 * torch.log(1. - best_scores) - 0.5 * torch.log(second_best_scores)
+    # loss_recon = - torch.log10(ssim(adversarial_samples, x, reduction='none') * 0.9 + 0.1)  # log to get smoother loss
 
-    # KL divergence with uniform probability ?
-    # NOTE: KL(preds(x), uniform(x)) = sum_x (preds(x) * log(preds(x) / uniform(x)))
-    # n_classes = 10
-    # loss_scores = torch.sum(atk_preds * torch.log(atk_preds * n_classes + 1e-10), dim=1)
-
-    # TODO next things to try
-    # ??
-
-    # loss reconstruction
-
-    # Tried Losses
-    # loss_recon = 1. - ssim(adversarial_samples, x, reduction='none')  # original (simply 1 - ssim)
-    # loss_recon = - torch.log(ssim(adversarial_samples, x, reduction='none'))  # log to get smoother loss
-    loss_recon = torch.mean((x - adversarial_samples).pow(2).view(b, -1), dim=1)  # L2 loss
-
-    # L2 + SSIM
-    # ssim_comp = - torch.log(ssim(adversarial_samples, x, reduction='none'))
-    # l2_comp = torch.mean(torch.pow(x - adversarial_samples, 2).view(b, -1), dim=1)
-    # loss_recon = ssim_comp * .9 + l2_comp *.1
-
-    # TODO next things to try
-    # ???
+    mse = torch.cdist(x.view(b, -1), adversarial_samples.view(b, -1)).diag().view(-1, 1)
+    loss_recon = torch.mean(mse, dim=1) / 0.5  # L2 loss with bound 0.5
 
     # final Loss
-    loss = torch.mean(.6 * loss_recon + .4 * loss_scores)
+    loss = torch.mean(loss_recon + loss_scores)  # both have max = 1
 
     loss.backward()
     optimizer.step()
@@ -358,7 +341,7 @@ def main(rank, world_size, opt):
 
             # save images across epochs
             if is_master and batch_index == 0:
-                l2_val = torch.mean((batch[0].to(opt.rank) - adv_samples).pow(2).view(-1)).item()
+                l2_val = torch.mean(torch.cdist(batch[0].to(opt.rank) .view(b, -1), adv_samples.view(b, -1), p=2).diag()).item()
                 ssim_val = ssim(batch[0].to(opt.rank), adv_samples).item()
 
                 plt.imshow(
