@@ -540,6 +540,7 @@ class AutoEncoder(nn.Module):
     def encode(self, x):
 
         chunks = []
+        mu_chunks = []
 
         s = self.stem(2 * x - 1.0)
 
@@ -570,6 +571,7 @@ class AutoEncoder(nn.Module):
         z, _ = dist.sample()
 
         chunks.append(z.view(z.shape[0], -1))
+        mu_chunks.append(mu_q)
 
         # apply normalizing flows
         nf_offset = 0
@@ -600,6 +602,7 @@ class AutoEncoder(nn.Module):
 
                     # add noise
                     chunks.append(z.view(z.shape[0], -1))
+                    mu_chunks.append(mu_p + mu_q if self.res_dist else mu_q)
 
                     # apply NF
                     for n in range(self.num_flows):
@@ -612,7 +615,7 @@ class AutoEncoder(nn.Module):
             else:
                 s = cell(s)
 
-        return chunks
+        return chunks, mu_chunks
 
     def decode(self, chunks: list):
 

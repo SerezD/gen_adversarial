@@ -151,7 +151,7 @@ def train_step(opt, batch, cnn_preprocess, optimizer, models):
     with torch.no_grad():
         # prediction according to attacked CNN
         top2_labels = torch.topk(cnn.module(cnn_preprocess(x)), k=2, dim=1).indices
-        chunks = nvae.module.encode(x)
+        chunks, _ = nvae.module.encode(x)
 
     # get adversarial chunks
     adversarial_chunks = []
@@ -171,12 +171,12 @@ def train_step(opt, batch, cnn_preprocess, optimizer, models):
     # LOSSES
     # minimize best and maximize second best (both are bounded in 0__1 range)
     second_best_scores = atk_preds[torch.arange(b), top2_labels[:, 1]]
-    loss_scores = (- torch.log10(1. - 0.9 * best_scores) - torch.log10(second_best_scores * 0.9 + 0.1)) * 0.5
+    loss_scores = (- torch.log10(1. - 0.9 * best_scores)) # - torch.log10(second_best_scores * 0.9 + 0.1)) * 0.5
 
-    # loss_recon = - torch.log10(ssim(adversarial_samples, x, reduction='none') * 0.9 + 0.1)  # log to get smoother loss
+    loss_recon = (1. - ssim(adversarial_samples, x, reduction='none')) / 0.15  # bound at 0.85
 
-    mse = torch.cdist(x.view(b, -1), adversarial_samples.view(b, -1)).diag().view(-1, 1)
-    loss_recon = torch.mean(mse, dim=1) / 0.5  # L2 loss with bound 0.5
+    # mse = torch.cdist(x.view(b, -1), adversarial_samples.view(b, -1)).diag().view(-1, 1)
+    # loss_recon = torch.mean(mse, dim=1) / 0.5  # L2 loss with bound 0.5
 
     # final Loss
     loss = torch.mean(loss_recon + loss_scores)  # both have max = 1
@@ -202,7 +202,7 @@ def validation_step(opt, batch, preprocess_cnn, models):
         clean_labels_tst = torch.argmax(tested_cnn.module(preprocess_cnn(x)), dim=1)
 
         # obtain adversaries
-        chunks = nvae.module.encode(x)
+        chunks, _ = nvae.module.encode(x)
         adversarial_chunks = []
         for i, c in enumerate(chunks):
             adv_c = walker.module(c, i)
