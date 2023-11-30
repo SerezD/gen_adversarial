@@ -205,18 +205,18 @@ def main():
 
 if __name__ == '__main__':
 
-    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/ours_weighted.pt'
-    # ADV_BASE_PATH = '/media/dserez/code/adversarial/'
-    # TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
-    # OUT_FILE = f'{ADV_BASE_PATH}images/'
+    CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/ours_weighted.pt'
+    ADV_BASE_PATH = '/media/dserez/code/adversarial/'
+    TORCH_HOME = '/media/dserez/runs/classification/cifar10/'
+    OUT_FILE = f'{ADV_BASE_PATH}images/'
+
+    BATCH_SIZE = 100
+
+    # CKPT_NVAE = '/home/dserez/gen_adversarial/loading/ours_weighted.pt'
+    # ADV_BASE_PATH = '/home/dserez/gen_adversarial/loading/'
+    # TORCH_HOME = '/home/dserez/gen_adversarial/loading/'
+    # OUT_FILE = f'{ADV_BASE_PATH}defense_images/'
     #
-    # BATCH_SIZE = 100
-
-    CKPT_NVAE = '/home/dserez/gen_adversarial/loading/ours_weighted.pt'
-    ADV_BASE_PATH = '/home/dserez/gen_adversarial/loading/'
-    TORCH_HOME = '/home/dserez/gen_adversarial/loading/'
-    OUT_FILE = f'{ADV_BASE_PATH}defense_images/'
-
-    BATCH_SIZE = 200
+    # BATCH_SIZE = 200
 
     main()

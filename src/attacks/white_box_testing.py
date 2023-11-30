@@ -173,10 +173,10 @@ def train_step(opt, batch, cnn_preprocess, optimizer, models):
     second_best_scores = atk_preds[torch.arange(b), top2_labels[:, 1]]
     loss_scores = (- torch.log10(1. - 0.9 * best_scores)) # - torch.log10(second_best_scores * 0.9 + 0.1)) * 0.5
 
-    loss_recon = (1. - ssim(adversarial_samples, x, reduction='none')) / 0.15  # bound at 0.85
+    # loss_recon = (1. - ssim(adversarial_samples, x, reduction='none')) / 0.15  # bound at 0.85
 
-    # mse = torch.cdist(x.view(b, -1), adversarial_samples.view(b, -1)).diag().view(-1, 1)
-    # loss_recon = torch.mean(mse, dim=1) / 0.5  # L2 loss with bound 0.5
+    mse = torch.cdist(x.view(b, -1), adversarial_samples.view(b, -1)).diag().view(-1, 1)
+    loss_recon = torch.mean(mse, dim=1) / 6.0  # L2 loss with bound 1.5
 
     # final Loss
     loss = torch.mean(loss_recon + loss_scores)  # both have max = 1
