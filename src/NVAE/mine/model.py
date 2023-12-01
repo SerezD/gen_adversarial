@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 import torch
 from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
@@ -171,189 +173,8 @@ class EncCombinerCell(nn.Module):
         return out
 
 
-class PreProcessing(nn.Module):
-    def __init__(self, img_channels: int, out_channels: int, n_blocks: int, n_cells_per_block: int, use_SE: bool):
-        """
-        take input image and pre-process for encoder input.
-        :param img_channels: input image channels (1 if grayscale or 3 if color images)
-        :param out_channels: number of initial channels of the encoder
-        :param n_blocks: number of preprocessing blocks
-        :param n_cells_per_block: number of cells in each preprocessing block
-        """
-
-        super().__init__()
-
-        self.img_channels = img_channels
-        self.out_channels = out_channels
-
-        self.n_blocks = n_blocks
-        self.n_cells_per_block = n_cells_per_block
-
-        # modules
-        self.init_conv = weight_norm(nn.Conv2d(img_channels, out_channels, kernel_size=3, padding=1, bias=True))
-
-        self.preprocessing = nn.ModuleList()
-
-        mult = 1
-        for b in range(n_blocks):
-
-            block = nn.ModuleList()
-
-            for c in range(n_cells_per_block):
-
-                is_last = (c == n_cells_per_block - 1)
-
-                if not is_last:
-                    # standard cell
-                    channels = out_channels * mult
-                    cell = ResidualCellEncoder(channels, channels, downsampling=False, use_SE=use_SE)
-                else:
-                    # cell with downsampling (double channels)
-                    channels = out_channels * mult
-                    cell = ResidualCellEncoder(channels, channels * 2, downsampling=True, use_SE=use_SE)
-                    mult = mult * 2
-
-                block.add_module(f'cell_{c}', cell)
-
-            self.preprocessing.add_module(f'block_{b}', block)
-
-    def forward(self, images: torch.Tensor):
-        """
-        :param images: normalized in 0__1 range
-        """
-
-        normalized_images = (images * 2) - 1.0
-        x = self.init_conv(normalized_images)
-
-        for b in range(self.n_blocks):
-            for c in range(self.n_cells_per_block):
-                x = self.preprocessing.get_submodule(f'block_{b}').get_submodule(f'cell_{c}')(x)
-        return x
-
-
-class Encoder(nn.Module):
-
-    def __init__(self, ae_args, mult: int, use_SE: bool):
-
-        super().__init__()
-
-        self.num_scales = ae_args['num_scales']
-        self.groups_per_scale = [
-            max(ae_args['min_groups_per_scale'], ae_args['num_groups_per_scale'] // 2)
-            if ae_args['is_adaptive'] else
-            ae_args['num_groups_per_scale']
-            for _ in range(self.num_scales)
-        ]  # different on each scale if is_adaptive
-
-        self.num_cells_per_group = ae_args['num_cells_per_group']
-        self.initial_channels = ae_args['initial_channels']
-
-        self.encoder_tower = nn.ModuleList()
-
-        # Each scale is a downsampling factor
-        # Each scale has n groups == latent variable at that resolution/scale
-        # Each group has n cells
-
-        for s in range(self.num_scales):
-
-            this_scale = nn.ModuleList()
-
-            # add groups
-            for g in range(self.groups_per_scale[s]):
-
-                this_group = nn.ModuleList()
-
-                # add cells for this group
-                for c in range(self.num_cells_per_group):
-
-                    channels = int(self.initial_channels * mult)
-                    cell = ResidualCellEncoder(channels, channels, downsampling=False, use_SE=use_SE)
-                    this_group.add_module(f'cell_{c}', cell)
-
-                # at the end of each group, except last group and scale, add combiner (for sampling z)
-                if not (s == self.num_scales - 1 and g == self.groups_per_scale[s] - 1):
-                    channels = int(self.initial_channels * mult)
-                    cell = EncCombinerCell(in_channels=channels, out_channels=channels)
-                    this_group.add_module(f'combiner', cell)
-
-                # in any case, add group to scale
-                this_scale.add_module(f'group_{g}', this_group)
-
-            # all groups added, add downsampling (except for last scale)
-            if s < self.num_scales - 1:
-
-                # cell with downsampling (double channels)
-                channels = int(self.initial_channels * mult)
-                cell = ResidualCellEncoder(channels, channels * 2, downsampling=True, use_SE=use_SE)
-                mult = mult * 2
-
-                this_scale.add_module('downsampling', cell)
-
-            self.encoder_tower.add_module(f'scale_{s}', this_scale)
-
-    def forward(self, x: torch.Tensor):
-
-        # here combiner cells refer to the + part (combine with decoder for z)
-        # TODO, can we remove combiner from here ?
-        combiner_cells_enc = []
-        combiner_cells_x = []
-
-        for s, scale in enumerate(self.encoder_tower):
-            for g in range(self.groups_per_scale[s]):
-                for c in range(self.num_cells_per_group):
-                    x = scale.get_submodule(f'group_{g}').get_submodule(f'cell_{c}')(x)
-
-                if any('combiner' in name for name, _ in scale.get_submodule(f'group_{g}').named_children()):
-                    combiner_cells_enc.append(scale.get_submodule(f'group_{g}').get_submodule(f'combiner'))
-                    combiner_cells_x.append(x)
-
-            if any('downsampling' in name for name, _ in scale.named_children()):
-                x = scale.get_submodule(f'downsampling')(x)
-
-        # reverse combiner cells and their input for decoder
-        combiner_cells_enc.reverse()
-        combiner_cells_x.reverse()
-
-        return x, combiner_cells_enc, combiner_cells_x
-
-
-# def init_encoder0(self, mult):
-#     num_c = int(self.num_channels_enc * mult)
-#     cell = nn.Sequential(
-#         nn.ELU(),
-#         Conv2D(num_c, num_c, kernel_size=1, bias=True),
-#         nn.ELU())
-#     return cell
-#
-# def init_normal_sampler(self, mult):
-#     enc_sampler, dec_sampler, nf_cells = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
-#     enc_kv, dec_kv, query = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
-#     for s in range(self.num_latent_scales):
-#         for g in range(self.groups_per_scale[self.num_latent_scales - s - 1]):
-#             # build mu, sigma generator for encoder
-#             num_c = int(self.num_channels_enc * mult)
-#             cell = Conv2D(num_c, 2 * self.num_latent_per_group, kernel_size=3, padding=1, bias=True)
-#             enc_sampler.append(cell)
-#             # build NF
-#             for n in range(self.num_flows):
-#                 arch = self.arch_instance['ar_nn']
-#                 num_c1 = int(self.num_channels_enc * mult)
-#                 num_c2 = 8 * self.num_latent_per_group  # use 8x features
-#                 nf_cells.append(PairedCellAR(self.num_latent_per_group, num_c1, num_c2, arch))
-#             if not (s == 0 and g == 0):  # for the first group, we use a fixed standard Normal.
-#                 num_c = int(self.num_channels_dec * mult)
-#                 cell = nn.Sequential(
-#                     nn.ELU(),
-#                     Conv2D(num_c, 2 * self.num_latent_per_group, kernel_size=1, padding=0, bias=True))
-#                 dec_sampler.append(cell)
-#
-#         mult = mult / CHANNEL_MULT
-#
-#     return enc_sampler, dec_sampler, nf_cells, enc_kv, dec_kv, query
-
-
 class AutoEncoder(nn.Module):
-    def __init__(self, ae_args: dict, use_SE: bool = True):
+    def __init__(self, ae_args: dict, img_channels: int = 3, use_SE: bool = True):
         """
         :param ae_args: hierarchical args
         :param use_SE: use Squeeze and Excitation
@@ -361,29 +182,209 @@ class AutoEncoder(nn.Module):
 
         super().__init__()
 
+        # ######################################################################################
+        # general params
+        self.img_channels = img_channels
+        self.base_channels, self.ch_multiplier = ae_args['initial_channels'], 1
+        self.use_SE = use_SE
+
+        # preprocessing
+        self.n_preprocessing_blocks = ae_args['num_preprocess_blocks']
+        self.n_cells_per_preprocessing_block = ae_args['num_preprocess_cells']
+
+        # encoder - decoder
+        self.num_scales = ae_args['num_scales']
+        self.groups_per_scale = [
+            max(ae_args['min_groups_per_scale'], ae_args['num_groups_per_scale'] // (2**i))
+            if ae_args['is_adaptive'] else
+            ae_args['num_groups_per_scale']
+            for i in range(self.num_scales)
+        ]  # different on each scale if is_adaptive (scale N has more groups, scale 0 has less)
+        self.groups_per_scale.reverse()
+
+        self.num_cells_per_group = ae_args['num_cells_per_group']
+
+        # latent variables and sampling
+        self.num_latent_per_group = ae_args['num_latent_per_group']
+        self.num_nf_cells = ae_args['num_nf_cells']
+
+        # ######################################################################################
         # structure
-        self.preprocess = PreProcessing(img_channels=3, out_channels=ae_args['initial_channels'],
-                                        n_blocks=ae_args['num_preprocess_blocks'],
-                                        n_cells_per_block=ae_args['num_preprocess_cells'], use_SE=use_SE)
+        self.preprocessing_block = self._init_preprocessing()
 
-        multiplier = ae_args['num_preprocess_blocks']
-        self.encoder = Encoder(ae_args, multiplier, use_SE=use_SE)
+        self.encoder_tower, self.encoder_combiners, self.encoder_0 = self._init_encoder()
 
-        # self.enc0 = self.init_encoder0(mult)
-        # self.enc_sampler, self.dec_sampler, self.nf_cells, self.enc_kv, self.dec_kv, self.query = \
-        #     self.init_normal_sampler(mult)
+        self.enc_sampler, self.dec_sampler, self.nf_cells = self._init_samplers()  # TODO nf_cells is not USED
+
+    def _init_preprocessing(self):
+        """
+        Returns the preprocessing module, structured as:
+                init_conv that changes num channels form self.img_channels to self.base_channels
+                N blocks of M cells each.
+                Each block doubles the number of channels and downsamples H, W by a factor of 2
+        """
+
+        preprocessing = OrderedDict()
+        preprocessing['init_conv'] = weight_norm(
+            nn.Conv2d(self.img_channels, self.base_channels, kernel_size=3, padding=1, bias=True))
+
+        for b in range(self.n_preprocessing_blocks):
+
+            block = OrderedDict()
+
+            for c in range(self.n_cells_per_preprocessing_block):
+
+                is_last = (c == self.n_cells_per_preprocessing_block - 1)
+
+                if not is_last:
+                    # standard cell
+                    channels = self.base_channels * self.ch_multiplier
+                    cell = ResidualCellEncoder(channels, channels, downsampling=False, use_SE=self.use_SE)
+                else:
+                    # cell with downsampling (double channels)
+                    channels = self.base_channels * self.ch_multiplier
+                    cell = ResidualCellEncoder(channels, channels * 2, downsampling=True, use_SE=self.use_SE)
+                    self.ch_multiplier *= 2
+
+                block[f'cell_{c}'] = cell
+
+            preprocessing[f'block_{b}'] = nn.Sequential(block)
+        return nn.Sequential(preprocessing)
+
+    def _init_encoder(self):
+        """
+
+        Returns the encoder tower module, the encoder combiner and the encoder 0 module.
+
+        encoder tower has N Scales, indexed from N-1 to 0 (in the sense that N-1 scale is the closest to the input).
+        each scale has M groups, where M can optionally change in each scale if the is_adaptive parameter is True.
+        each group has K residuals cells, structured as Fig 2b. of the paper
+
+        For each scale > 0, a downsampling operator applies and number of channels is doubled
+        For each group (except last one of scale 0) one latent variable will be produced, through the encoder_combiners
+        module
+
+        """
+
+        encoder_tower = nn.ModuleList()
+        encoder_combiners = nn.ModuleList()
+
+        for s in range(self.num_scales - 1, -1, -1):
+
+            scale = nn.ModuleList()
+            channels = int(self.base_channels * self.ch_multiplier)
+
+            # add groups, cells to scale and combiner at the end
+            for g in range(self.groups_per_scale[s]):
+
+                group = nn.ModuleList()
+
+                # add cells for this group
+                for c in range(self.num_cells_per_group):
+                    cell = ResidualCellEncoder(channels, channels, downsampling=False, use_SE=self.use_SE)
+                    group.add_module(f'cell_{c}', cell)
+
+                # at the end of each group, except last group and scale, add combiner (for sampling z)
+                if not (s == 0 and g == self.groups_per_scale[s] - 1):
+                    cell = EncCombinerCell(in_channels=channels, out_channels=channels)
+                    encoder_combiners.add_module(f'combiner_{s}:{g}', cell)
+
+                # add group to scale
+                scale.add_module(f'group_{g}', group)
+
+            # final downsampling (except for last scale)
+            if s > 0:
+
+                # cell with downsampling (double channels)
+                cell = ResidualCellEncoder(channels, channels * 2, downsampling=True, use_SE=self.use_SE)
+                scale.add_module('downsampling', cell)
+                self.ch_multiplier *= 2
+
+            encoder_tower.add_module(f'scale_{s}', scale)
+
+        # encoder 0 takes the final output of encoder tower
+        channels = int(self.base_channels * self.ch_multiplier)
+        encoder_0 = nn.Sequential(
+            nn.ELU(),
+            weight_norm(nn.Conv2d(channels, channels, kernel_size=1, bias=True)),
+            nn.ELU())
+
+        return encoder_tower, encoder_combiners, encoder_0
+
+    def _init_samplers(self):
+        """
+        Returns encoder_sampler, decoder_sampler and optional NF cells for encoders
+        encoder sampler (1 per latent variable) takes encoder_combiner output and gives mu, sigma params.
+        decoder sampler same but for decoder
+        NF cells, if specified, will be used after z_i sampling, only when auto-encoding
+        """
+
+        enc_sampler, dec_sampler = nn.ModuleList(), nn.ModuleList()
+        nf_cells = nn.ModuleList() if self.num_nf_cells is not None else nn.Identity()
+
+        for s in range(self.num_scales - 1, -1, -1):
+
+            channels = int(self.base_channels * self.ch_multiplier)
+            for g in range(self.groups_per_scale[s]):
+
+                # encoder sampler
+                enc_sampler.add_module(f'sampler_{s}:{g}',
+                                       weight_norm(nn.Conv2d(channels, 2 * self.num_latent_per_group,
+                                                             kernel_size=3, padding=1, bias=True)))
+
+                # build [optional] NF TODO
+
+                # decoder samplers (first group uses standard gaussian)
+                if not (s == 0 and g == 0):
+                    dec_sampler.add_module(f'sampler_{s}:{g}',
+                                           nn.Sequential(
+                                               nn.ELU(),
+                                               weight_norm(
+                                                    nn.Conv2d(channels, 2 * self.num_latent_per_group,
+                                                              kernel_size=1, padding=0, bias=True))
+                                            )
+                    )
+
+            self.ch_multiplier *= 2
+
+        return enc_sampler, dec_sampler, nf_cells
 
     def forward(self, gt_images: torch.Tensor):
         """
-        :param gt_images:
+        :param gt_images: images in 0__1 range
         :return:
         """
 
         # preprocessing phase
-        x = self.preprocess(gt_images)
+        normalized_images = (gt_images * 2) - 1.0  # in range -1 1
+        x = self.preprocessing_block(normalized_images)
 
-        # encoding phase
-        x, combiner_cells_enc, combiner_cells_x = self.encoder(x)
+        # encoding tower phase
+        encoder_combiners_x = {}
+
+        for s in range(self.num_scales - 1, -1, -1):
+
+            scale = self.encoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                group = scale.get_submodule(f'group_{g}')
+
+                for c in range(self.num_cells_per_group):
+                    x = group.get_submodule(f'cell_{c}')(x)
+
+                # add intermediate x (will be used as combiner input for this scale)
+                if not (s == 0 and g == self.groups_per_scale[s] - 1):
+                    encoder_combiners_x[f'{s}:{g}'] = x
+
+            if s > 0:
+                x = scale.get_submodule(f'downsampling')(x)
+
+        # encoder 0
+        x = self.encoder_0(x)
+
+        # sampling z_0
+        # TODO go from here
 
         # decoding phase
 
@@ -426,7 +427,7 @@ def main(rank, world_size, config):
     setup(rank, world_size)
 
     # create model and move it to GPU with id rank
-    model = AutoEncoder(config['autoencoder']).to(rank)
+    model = AutoEncoder(config['autoencoder'], config['img_channels']).to(rank)
     ddp_model = DDP(model, device_ids=[rank])
 
     img_batch = torch.rand((4, 3, 32, 32), device='cuda:0')
