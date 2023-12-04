@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
 
 from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
+from src.NVAE.mine.distributions import Normal
 
 
 class SE(nn.Module):
@@ -118,6 +119,8 @@ class ResidualCellDecoder(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int, upsampling: bool, use_SE: bool):
         """
+        Figure 3a of the paper.
+
         :param in_channels:
         :param out_channels:
         :param upsampling:
@@ -127,36 +130,36 @@ class ResidualCellDecoder(nn.Module):
         super().__init__()
 
         if upsampling:
-            stride = -1
-            skip_connection = SkipUp(in_channels, out_channels // 2, stride)
+            self.skip_connection = SkipUp(in_channels, out_channels // 2, stride=1)
         else:
-            stride = 1
-            skip_connection = nn.Identity()
+            self.skip_connection = nn.Identity()
 
         self.use_se = use_SE
-        self._num_nodes = 2
-        self._ops = nn.ModuleList()
 
-        # TODO
-        # for i in range(self._num_nodes):
-        #     i_stride = stride if i == 0 else 1
-        #     C = Cin if i == 0 else Cout
-        #     primitive = arch[i]
-        #     op = OPS[primitive](C, Cout, i_stride)
-        #     self._ops.append(op)
-        #
-        # # SE
-        # if self.use_se:
-        #     self.se = SE(Cout, Cout)
+        hidden_dim = in_channels * 6
 
-    def forward(self, s):
-        # skip branch
-        skip = self.skip(s)
-        for i in range(self._num_nodes):
-            s = self._ops[i](s)
+        residual = [nn.UpsamplingNearest2d(scale_factor=2)] if upsampling else []
+        residual += [
+            nn.SyncBatchNorm(in_channels, eps=1e-5, momentum=0.05),
+            nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=False),
+            SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, padding=2, groups=hidden_dim, bias=False),
+            SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
+            nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=False),
+            nn.SyncBatchNorm(out_channels, eps=1e-5, momentum=0.05)
+        ]
 
-        s = self.se(s) if self.use_se else s
-        return skip + 0.1 * s
+        if self.use_se:
+            residual.append(SE(out_channels, out_channels))
+
+        self.residual = nn.Sequential(*residual)
+
+    def forward(self, x: torch.Tensor):
+
+        residual = 0.1 * self.residual(x)
+        x = self.skip_connection(x)
+
+        return x + residual
 
 
 class EncCombinerCell(nn.Module):
@@ -170,6 +173,21 @@ class EncCombinerCell(nn.Module):
         # TODO understand what x1, x2 are
         x2 = self.conv(x2)
         out = x1 + x2
+        return out
+
+
+class DecCombinerCell(nn.Module):
+    def __init__(self, in_channels1: int, in_channels2: int, out_channels: int):
+
+        super().__init__()
+
+        self.conv = weight_norm(nn.Conv2d(in_channels1 + in_channels2, out_channels, kernel_size=1))
+
+    def forward(self, x1, x2):
+
+        # TODO understand what x1, x2 are
+        out = torch.cat([x1, x2], dim=1)
+        out = self.conv(out)
         return out
 
 
@@ -215,6 +233,8 @@ class AutoEncoder(nn.Module):
         self.encoder_tower, self.encoder_combiners, self.encoder_0 = self._init_encoder()
 
         self.enc_sampler, self.dec_sampler, self.nf_cells = self._init_samplers()  # TODO nf_cells is not USED
+
+        self.decoder_tower, self.decoder_combiners = self._init_decoder()
 
     def _init_preprocessing(self):
         """
@@ -275,7 +295,7 @@ class AutoEncoder(nn.Module):
             channels = int(self.base_channels * self.ch_multiplier)
 
             # add groups, cells to scale and combiner at the end
-            for g in range(self.groups_per_scale[s]):
+            for g in range(self.groups_per_scale[s] - 1, -1, -1):
 
                 group = nn.ModuleList()
 
@@ -297,7 +317,7 @@ class AutoEncoder(nn.Module):
 
                 # cell with downsampling (double channels)
                 cell = ResidualCellEncoder(channels, channels * 2, downsampling=True, use_SE=self.use_SE)
-                scale.add_module('downsampling', cell)
+                scale.add_module(f'downsampling', cell)
                 self.ch_multiplier *= 2
 
             encoder_tower.add_module(f'scale_{s}', scale)
@@ -322,9 +342,11 @@ class AutoEncoder(nn.Module):
         enc_sampler, dec_sampler = nn.ModuleList(), nn.ModuleList()
         nf_cells = nn.ModuleList() if self.num_nf_cells is not None else nn.Identity()
 
-        for s in range(self.num_scales - 1, -1, -1):
+        ch_multiplier = self.ch_multiplier
 
-            channels = int(self.base_channels * self.ch_multiplier)
+        for s in range(self.num_scales):
+
+            channels = int(self.base_channels * ch_multiplier)
             for g in range(self.groups_per_scale[s]):
 
                 # encoder sampler
@@ -345,9 +367,46 @@ class AutoEncoder(nn.Module):
                                             )
                     )
 
-            self.ch_multiplier *= 2
+            ch_multiplier /= 2
 
         return enc_sampler, dec_sampler, nf_cells
+
+    def _init_decoder(self):
+
+        decoder_tower = nn.ModuleList()
+        decoder_combiners = nn.ModuleList()
+
+        for s in range(self.num_latent_scales):
+
+            scale = nn.ModuleList()
+            channels = int(self.base_channels * self.ch_multiplier)
+
+            for g in range(self.groups_per_scale):
+
+                group = nn.ModuleList()
+
+                if s > 0 and g > 0:
+
+                    # add cells for this group
+                    for c in range(self.num_cells_per_group):
+                        cell = ResidualCellDecoder(channels, channels, upsampling=False, use_SE=self.use_SE)
+                        group.add_module(f'cell_{c}', cell)
+
+                cell = DecCombinerCell(channels, self.num_latent_per_group, channels)
+                decoder_combiners.add_module(f'combiner_{s}:{g}', cell)
+
+            # upsampling cell at scale end (except for last)
+            if s < self.num_latent_scales - 1:
+
+                cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE)
+                scale.add_module(f'upsampling', cell)
+
+                self.ch_multiplier /= 2
+
+            decoder_tower.add_module(f'scale_{s}', scale)
+
+        return decoder_tower, decoder_combiners
+
 
     def forward(self, gt_images: torch.Tensor):
         """
@@ -383,10 +442,33 @@ class AutoEncoder(nn.Module):
         # encoder 0
         x = self.encoder_0(x)
 
-        # sampling z_0
-        # TODO go from here
+        # obtain q(z_0|x), p(z_0) for KL loss, sample z_0
+
+        # encoder q(z_0|x)
+        mu_q, log_sig_q = torch.chunk(self.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
+        dist = Normal(mu_q, log_sig_q)
+        z, _ = dist.sample()  # uses reparametrization trick
+        # log_q_conv = dist.log_p(z)  # this is apparently not used anywhere (in the loss computation) TODO
+
+        # apply normalizing flows TODO
+        # nf_offset = 0
+        # for n in range(self.num_flows):
+        #     z, log_det = self.nf_cells[n](z, ftr)
+        #     log_q_conv -= log_det
+        # nf_offset += self.num_flows
+
+        all_q = [dist]
+        # all_log_q = [log_q_conv]
+
+        # prior p(z_0) is a standard Gaussian (log_sigma 0 --> sigma = 1.)
+        dist = Normal(mu=torch.zeros_like(z), log_sigma=torch.zeros_like(z))
+        all_p = [dist]
+
+        # log_p_conv = dist.log_p(z) # this is apparently not used anywhere (in the loss computation) TODO
+        # all_log_p = [log_p_conv]
 
         # decoding phase
+        # TODO Let's decoding
 
         # postprocessing phase
         return x

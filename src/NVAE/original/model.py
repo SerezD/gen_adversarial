@@ -375,6 +375,7 @@ class AutoEncoder(nn.Module):
             z, log_det = self.nf_cells[n](z, ftr)
             log_q_conv -= log_det
         nf_offset += self.num_flows
+
         all_q = [dist]
         all_log_q = [log_q_conv]
 
