@@ -1,4 +1,7 @@
-img_channels: 3
+resolution:
+  - 32
+  - 32
+  - 3
 
 autoencoder:
   num_scales: 3 # the number of downsamples in encoder tower (latent scales)
@@ -9,9 +12,7 @@ autoencoder:
   num_latent_per_group: 32 # number of channels in group latent variables
   num_nf_cells: # not implemented yet
   initial_channels: 32 # number of initial channels in encoder
-  num_preprocess_blocks: 1 # number of preprocessing blocks (each one downscales image)
-  num_preprocess_cells: 1 # number of cells per preprocessing block
-  num_postprocess_blocks: 1 # number of postprocessing blocks (each one upsamples image)
-  num_postprocess_cells: 1 # number of cells per postprocessing block
+  num_pre-post_process_blocks: 1 # number of pre/post processing blocks (each one down/up scales image)
+  num_pre-post_process_cells: 1 # number of cells per pre/post processing block
 
 training:

@@ -96,7 +96,7 @@ def main(args):
         writer.add_scalar('train/nelbo', train_nelbo, global_step)
 
         model.eval()
-        # generate samples less frequently
+        # generate samples less frequently TODO THIS IS THE GENERATION PHASE!
         eval_freq = 1 if args.epochs <= 50 else 20
         if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
             with torch.no_grad():

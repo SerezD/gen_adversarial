@@ -90,7 +90,7 @@ class ResidualCellEncoder(nn.Module):
         # skip connection has convs if downscaling
         if downsampling:
             stride = 2
-            self.skip_connection = SkipDown(in_channels, in_channels * 2, stride)
+            self.skip_connection = SkipDown(in_channels, out_channels, stride)
         else:
             stride = 1
             self.skip_connection = nn.Identity()
@@ -130,7 +130,7 @@ class ResidualCellDecoder(nn.Module):
         super().__init__()
 
         if upsampling:
-            self.skip_connection = SkipUp(in_channels, out_channels // 2, stride=1)
+            self.skip_connection = SkipUp(in_channels, out_channels, stride=1)
         else:
             self.skip_connection = nn.Identity()
 
@@ -168,31 +168,35 @@ class EncCombinerCell(nn.Module):
 
         self.conv = weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=1))
 
-    def forward(self, x1, x2):
+    def forward(self, x_enc, x_dec):
+        """
+        combine encoder ad decoder features
+        """
 
-        # TODO understand what x1, x2 are
-        x2 = self.conv(x2)
-        out = x1 + x2
+        x_dec = self.conv(x_dec)
+        out = x_enc + x_dec
         return out
 
 
 class DecCombinerCell(nn.Module):
-    def __init__(self, in_channels1: int, in_channels2: int, out_channels: int):
+    def __init__(self, feature_channels: int, z_channels: int, out_channels: int):
+        """
+        combine feature + noise channels during decoding / generation
+        """
 
         super().__init__()
 
-        self.conv = weight_norm(nn.Conv2d(in_channels1 + in_channels2, out_channels, kernel_size=1))
+        self.conv = weight_norm(nn.Conv2d(feature_channels + z_channels, out_channels, kernel_size=1))
 
-    def forward(self, x1, x2):
+    def forward(self, x, z):
 
-        # TODO understand what x1, x2 are
-        out = torch.cat([x1, x2], dim=1)
+        out = torch.cat([x, z], dim=1)
         out = self.conv(out)
         return out
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, ae_args: dict, img_channels: int = 3, use_SE: bool = True):
+    def __init__(self, ae_args: dict, resolution: tuple, use_SE: bool = True):
         """
         :param ae_args: hierarchical args
         :param use_SE: use Squeeze and Excitation
@@ -202,13 +206,15 @@ class AutoEncoder(nn.Module):
 
         # ######################################################################################
         # general params
-        self.img_channels = img_channels
+        self.image_resolution, _, self.img_channels = resolution
         self.base_channels, self.ch_multiplier = ae_args['initial_channels'], 1
         self.use_SE = use_SE
 
-        # preprocessing
-        self.n_preprocessing_blocks = ae_args['num_preprocess_blocks']
-        self.n_cells_per_preprocessing_block = ae_args['num_preprocess_cells']
+        # pre and post processing
+        self.n_preprocessing_blocks = ae_args['num_pre-post_process_blocks']
+        self.n_cells_per_preprocessing_block = ae_args['num_pre-postprocess_cells']
+        self.n_postprocessing_blocks = ae_args['num_pre-post_process_blocks']
+        self.n_cells_per_postprocessing_block = ae_args['num_pre-postprocess_cells']
 
         # encoder - decoder
         self.num_scales = ae_args['num_scales']
@@ -227,6 +233,11 @@ class AutoEncoder(nn.Module):
         self.num_nf_cells = ae_args['num_nf_cells']
 
         # ######################################################################################
+        # initial learned constant
+        scaling_factor = 2 ** (self.n_preprocessing_blocks + self.num_scales - 1)
+        c, r = int(scaling_factor * self.base_channels), self.image_resolution // scaling_factor
+        self.const_prior = nn.Parameter(torch.rand(size=(1, c, r, r)), requires_grad=True)
+
         # structure
         self.preprocessing_block = self._init_preprocessing()
 
@@ -235,6 +246,9 @@ class AutoEncoder(nn.Module):
         self.enc_sampler, self.dec_sampler, self.nf_cells = self._init_samplers()  # TODO nf_cells is not USED
 
         self.decoder_tower, self.decoder_combiners = self._init_decoder()
+
+        self.postprocessing_block = self._init_postprocessing()
+
 
     def _init_preprocessing(self):
         """
@@ -305,7 +319,7 @@ class AutoEncoder(nn.Module):
                     group.add_module(f'cell_{c}', cell)
 
                 # at the end of each group, except last group and scale, add combiner (for sampling z)
-                if not (s == 0 and g == self.groups_per_scale[s] - 1):
+                if not (s == 0 and g == 0):
                     cell = EncCombinerCell(in_channels=channels, out_channels=channels)
                     encoder_combiners.add_module(f'combiner_{s}:{g}', cell)
 
@@ -376,27 +390,29 @@ class AutoEncoder(nn.Module):
         decoder_tower = nn.ModuleList()
         decoder_combiners = nn.ModuleList()
 
-        for s in range(self.num_latent_scales):
+        for s in range(self.num_scales):
 
             scale = nn.ModuleList()
             channels = int(self.base_channels * self.ch_multiplier)
 
-            for g in range(self.groups_per_scale):
+            for g in range(self.groups_per_scale[s]):
 
                 group = nn.ModuleList()
 
-                if s > 0 and g > 0:
+                if not (s == 0 and g == 0):
 
                     # add cells for this group
                     for c in range(self.num_cells_per_group):
                         cell = ResidualCellDecoder(channels, channels, upsampling=False, use_SE=self.use_SE)
                         group.add_module(f'cell_{c}', cell)
 
+                    scale.add_module(f'group_{g}', group)
+
                 cell = DecCombinerCell(channels, self.num_latent_per_group, channels)
                 decoder_combiners.add_module(f'combiner_{s}:{g}', cell)
 
             # upsampling cell at scale end (except for last)
-            if s < self.num_latent_scales - 1:
+            if s < self.num_scales - 1:
 
                 cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE)
                 scale.add_module(f'upsampling', cell)
@@ -407,12 +423,52 @@ class AutoEncoder(nn.Module):
 
         return decoder_tower, decoder_combiners
 
+    def _init_postprocessing(self):
+
+        postprocessing = OrderedDict()
+
+        for b in range(self.n_postprocessing_blocks):
+
+            block = OrderedDict()
+
+            for c in range(self.n_cells_per_postprocessing_block):
+
+                is_first = (c == 0)
+
+                if not is_first:
+                    # standard cell
+                    channels = self.base_channels * self.ch_multiplier
+                    cell = ResidualCellDecoder(channels, channels, upsampling=False, use_SE=self.use_SE)
+                else:
+                    # cell with downsampling (double channels)
+                    channels = self.base_channels * self.ch_multiplier
+                    cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE)
+                    self.ch_multiplier /= 2
+
+                block[f'cell_{c}'] = cell
+
+            postprocessing[f'block_{b}'] = nn.Sequential(block)
+
+        return nn.Sequential(postprocessing)
+
+    def _init_to_logits(self):
+
+            channels = int(self.base_channels * self.ch_multiplier)
+            to_logits = nn.Sequential(
+                nn.ELU(),
+                weight_norm(nn.Conv2d(channels, 100, kernel_size=3, padding=1, bias=True))
+            )
+
+            # DiscMixLogistic(logits, self.num_mix_output, num_bits=self.num_bits)
+
 
     def forward(self, gt_images: torch.Tensor):
         """
         :param gt_images: images in 0__1 range
         :return:
         """
+
+        b = gt_images.shape[0]
 
         # preprocessing phase
         normalized_images = (gt_images * 2) - 1.0  # in range -1 1
@@ -433,7 +489,7 @@ class AutoEncoder(nn.Module):
                     x = group.get_submodule(f'cell_{c}')(x)
 
                 # add intermediate x (will be used as combiner input for this scale)
-                if not (s == 0 and g == self.groups_per_scale[s] - 1):
+                if not (s == 0 and g == 0):
                     encoder_combiners_x[f'{s}:{g}'] = x
 
             if s > 0:
@@ -447,8 +503,8 @@ class AutoEncoder(nn.Module):
         # encoder q(z_0|x)
         mu_q, log_sig_q = torch.chunk(self.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
         dist = Normal(mu_q, log_sig_q)
-        z, _ = dist.sample()  # uses reparametrization trick
-        # log_q_conv = dist.log_p(z)  # this is apparently not used anywhere (in the loss computation) TODO
+        z_0, _ = dist.sample()  # uses reparametrization trick
+        # log_q_conv = dist.log_p(z_0)  # this is apparently not used anywhere (in the loss computation) TODO
 
         # apply normalizing flows TODO
         # nf_offset = 0
@@ -461,17 +517,79 @@ class AutoEncoder(nn.Module):
         # all_log_q = [log_q_conv]
 
         # prior p(z_0) is a standard Gaussian (log_sigma 0 --> sigma = 1.)
-        dist = Normal(mu=torch.zeros_like(z), log_sigma=torch.zeros_like(z))
+        dist = Normal(mu=torch.zeros_like(z_0), log_sigma=torch.zeros_like(z_0))
         all_p = [dist]
 
         # log_p_conv = dist.log_p(z) # this is apparently not used anywhere (in the loss computation) TODO
         # all_log_p = [log_p_conv]
 
         # decoding phase
-        # TODO Let's decoding
+
+        # start from constant prior
+        x = self.const_prior.expand(b, -1, -1, -1)
+
+        # first combiner (inject z_0)
+        x = self.decoder_combiners.get_submodule('combiner_0:0')(x, z_0)
+
+        for s in range(self.num_scales):
+
+            scale = self.decoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                if not (s == 0 and g == 0):
+
+                    # group forward
+                    group = scale.get_submodule(f'group_{g}')
+
+                    for c in range(self.num_cells_per_group):
+                        x = group.get_submodule(f'cell_{c}')(x)
+
+                    # obtain q(z_i|x, z_l>i), p(z_i|z_l>i) for KL loss, sample z_i
+                    # extract params for p (conditioned on previous decoding)
+                    mu_p, log_sig_p = torch.chunk(self.dec_sampler.get_submodule(f'sampler_{s}:{g}')(x), 2, dim=1)
+
+                    # extract params for q (conditioned on encoder features and previous decoding)
+                    enc_combiner = self.encoder_combiners.get_submodule(f'combiner_{s}:{g}')
+                    enc_sampler = self.enc_sampler.get_submodule(f'sampler_{s}:{g}')
+                    mu_q, log_sig_q = torch.chunk(
+                        enc_sampler(enc_combiner(encoder_combiners_x[f'{s}:{g}'], x)),
+                        2, dim=1)
+
+                    # sample z_i as combination of encoder and decoder params
+                    dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
+                    z_i, _ = dist.sample()
+                    # log_q_conv = dist.log_p(z_i)  # apparently not used anywhere (in the loss computation) TODO
+
+                    # # apply NF  TODO
+                    # for n in range(self.num_flows):
+                    #     z, log_det = self.nf_cells[nf_offset + n](z, ftr)
+                    #     log_q_conv -= log_det
+                    # nf_offset += self.num_flows
+                    # all_log_q.append(log_q_conv)
+                    all_q.append(dist)
+
+                    # log_p(z) for evaluation/ loss computation TODO (verify)
+                    dist = Normal(mu_p, log_sig_p)
+                    all_p.append(dist)
+                    # log_p_conv = dist.log_p(z)    # apparently not used TODO
+                    # all_log_p.append(log_p_conv)
+
+                    # combine x and z_i
+                    x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
+
+            # upsampling at the end of each scale
+            if s < self.num_scales - 1:
+                x = scale.get_submodule('upsampling')(x)
 
         # postprocessing phase
-        return x
+        x = self.postprocessing_block(x)
+
+        # sample image
+        logits = self.image_conditional(x)
+
+
+        return logits
 
 
 # TODO THIS WILL BE TRAIN
@@ -509,7 +627,7 @@ def main(rank, world_size, config):
     setup(rank, world_size)
 
     # create model and move it to GPU with id rank
-    model = AutoEncoder(config['autoencoder'], config['img_channels']).to(rank)
+    model = AutoEncoder(config['autoencoder'], config['resolution']).to(rank)
     ddp_model = DDP(model, device_ids=[rank])
 
     img_batch = torch.rand((4, 3, 32, 32), device='cuda:0')
