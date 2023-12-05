@@ -604,6 +604,7 @@ class AutoEncoder(nn.Module):
                     # add noise
                     chunks.append(z.view(z.shape[0], -1))
                     mu_chunks.append(mu_p + mu_q if self.res_dist else mu_q)
+                    # mu_chunks.append(mu_q)
 
                     # apply NF
                     for n in range(self.num_flows):
@@ -633,6 +634,11 @@ class AutoEncoder(nn.Module):
                     z = chunks.pop(0)
 
                 # 'combiner_dec'
+                # note: reformat z if needed
+                if len(z.shape) == 2:
+                    b, _, h, w = s.shape
+                    z = z.view(b, -1, h, w)
+
                 s = cell(s, z)
                 idx_dec += 1
             else:
