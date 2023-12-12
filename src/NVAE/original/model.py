@@ -541,7 +541,10 @@ class AutoEncoder(nn.Module):
     def encode(self, x):
 
         chunks = []
-        mu_chunks = []
+        mu_x = []
+        mu_z = []
+        sampled_mu_z = []
+        sampled_mu_x = []
 
         s = self.stem(2 * x - 1.0)
 
@@ -564,6 +567,7 @@ class AutoEncoder(nn.Module):
         combiner_cells_enc.reverse()
         combiner_cells_s.reverse()
 
+        # SAMPLE z_0 from q(x)
         idx_dec = 0
         ftr = self.enc0(s)  # this reduces the channel dimension
         param0 = self.enc_sampler[idx_dec](ftr)
@@ -571,8 +575,13 @@ class AutoEncoder(nn.Module):
         dist = Normal(mu_q, log_sig_q)  # for the first approx. posterior
         z, _ = dist.sample()
 
+        # SAVE CHUNK 0
         chunks.append(z.view(z.shape[0], -1))
-        mu_chunks.append(mu_q)
+        mu_x.append(mu_q)
+        mu_z.append(torch.zeros_like(mu_q, device=mu_q.device))
+        sampled_mu_z.append(Normal(mu=torch.zeros_like(z), log_sigma=torch.zeros_like(z)).sample()[0])
+        sampled_mu_x.append(z.view(z.shape[0], -1))
+        # ##################################################################
 
         # apply normalizing flows
         nf_offset = 0
@@ -589,12 +598,14 @@ class AutoEncoder(nn.Module):
         s = s.expand(batch_size, -1, -1, -1)
         for cell in self.dec_tower:
             if cell.cell_type == 'combiner_dec':
+
                 if idx_dec > 0:
-                    # form prior
+
+                    # SAMPLE prior from Z
                     param = self.dec_sampler[idx_dec - 1](s)
                     mu_p, log_sig_p = torch.chunk(param, 2, dim=1)
 
-                    # form encoder
+                    # SAMPLE prior from X
                     ftr = combiner_cells_enc[idx_dec - 1](combiner_cells_s[idx_dec - 1], s)
                     param = self.enc_sampler[idx_dec](ftr)
                     mu_q, log_sig_q = torch.chunk(param, 2, dim=1)
@@ -603,8 +614,10 @@ class AutoEncoder(nn.Module):
 
                     # add noise
                     chunks.append(z.view(z.shape[0], -1))
-                    mu_chunks.append(mu_p + mu_q if self.res_dist else mu_q)
-                    # mu_chunks.append(mu_q)
+                    mu_z.append(mu_p)
+                    mu_x.append(mu_q)
+                    sampled_mu_z.append(Normal(mu=mu_p, log_sigma=log_sig_p).sample()[0])
+                    sampled_mu_x.append(Normal(mu=mu_q, log_sigma=log_sig_q).sample()[0])
 
                     # apply NF
                     for n in range(self.num_flows):
@@ -617,7 +630,7 @@ class AutoEncoder(nn.Module):
             else:
                 s = cell(s)
 
-        return chunks, mu_chunks
+        return chunks, mu_x, mu_z, sampled_mu_x, sampled_mu_z
 
     def decode(self, chunks: list):
 
@@ -652,6 +665,51 @@ class AutoEncoder(nn.Module):
 
         logits = self.image_conditional(s)
         return logits
+
+    def sample_from_chunk0(self, chunks, t):
+
+        z = chunks[0]
+
+        idx_dec = 0
+        s = self.prior_ftr0.unsqueeze(0)
+        batch_size = z.size(0)
+        s = s.expand(batch_size, -1, -1, -1)
+
+        if len(z.shape) == 2:
+            b, _, h, w = s.shape
+            z = z.view(b, -1, h, w)
+
+        for cell in self.dec_tower:
+            if cell.cell_type == 'combiner_dec':
+                if idx_dec > 0:
+
+                    if len(chunks) > idx_dec:
+                        z = chunks[idx_dec]
+                        if len(z.shape) == 2:
+                            b, _, h, w = s.shape
+                            z = z.view(b, -1, h, w)
+                    else:
+                        # form prior
+                        param = self.dec_sampler[idx_dec - 1](s)
+                        mu, log_sigma = torch.chunk(param, 2, dim=1)
+                        dist = Normal(mu, log_sigma, t)
+                        z, _ = dist.sample()
+
+                # 'combiner_dec'
+                s = cell(s, z)
+                idx_dec += 1
+            else:
+                s = cell(s)
+
+        if self.vanilla_vae:
+            s = self.stem_decoder(z)
+
+        for cell in self.post_process:
+            s = cell(s)
+
+        logits = self.image_conditional(s)
+        return logits
+
     # ########################################################################################################
 
     def sample(self, num_samples, t):
