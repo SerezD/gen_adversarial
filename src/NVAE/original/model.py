@@ -541,10 +541,7 @@ class AutoEncoder(nn.Module):
     def encode(self, x):
 
         chunks = []
-        mu_x = []
-        mu_z = []
-        sampled_mu_z = []
-        sampled_mu_x = []
+        normalized_chunks = []
 
         s = self.stem(2 * x - 1.0)
 
@@ -575,19 +572,18 @@ class AutoEncoder(nn.Module):
         dist = Normal(mu_q, log_sig_q)  # for the first approx. posterior
         z, _ = dist.sample()
 
-        # SAVE CHUNK 0
-        chunks.append(z.view(z.shape[0], -1))
-        mu_x.append(mu_q)
-        mu_z.append(torch.zeros_like(mu_q, device=mu_q.device))
-        sampled_mu_z.append(Normal(mu=torch.zeros_like(z), log_sigma=torch.zeros_like(z)).sample()[0])
-        sampled_mu_x.append(z.view(z.shape[0], -1))
-        # ##################################################################
-
         # apply normalizing flows
         nf_offset = 0
+        z_n = z
         for n in range(self.num_flows):
-            z, log_det = self.nf_cells[n](z, ftr)
+            z_n, log_det = self.nf_cells[n](z_n, ftr)
         nf_offset += self.num_flows
+
+        # SAVE CHUNK 0
+        chunks.append(z.view(z.shape[0], -1))
+        normalized_chunks.append(((z - mu_q)/ (torch.exp(log_sig_q) + 1e-2)).view(z.shape[0], -1))
+        z = z_n
+        # ##################################################################
 
         # To make sure we do not pass any deterministic features from x to decoder.
         s = 0
@@ -612,17 +608,16 @@ class AutoEncoder(nn.Module):
                     dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q) if self.res_dist else Normal(mu_q, log_sig_q)
                     z, _ = dist.sample()
 
-                    # add noise
-                    chunks.append(z.view(z.shape[0], -1))
-                    mu_z.append(mu_p)
-                    mu_x.append(mu_q)
-                    sampled_mu_z.append(Normal(mu=mu_p, log_sigma=log_sig_p).sample()[0])
-                    sampled_mu_x.append(Normal(mu=mu_q, log_sigma=log_sig_q).sample()[0])
-
                     # apply NF
+                    z_n = z
                     for n in range(self.num_flows):
-                        z, log_det = self.nf_cells[nf_offset + n](z, ftr)
+                        z_n, log_det = self.nf_cells[nf_offset + n](z_n, ftr)
                     nf_offset += self.num_flows
+
+                    # SAVE CHUNK i
+                    chunks.append(z.view(z.shape[0], -1))
+                    normalized_chunks.append(((z - (mu_p + mu_q)) / (torch.exp(log_sig_p + log_sig_q) + 1e-2)).view(z.shape[0], -1))
+                    z = z_n
 
                 # 'combiner_dec'
                 s = cell(s, z)
@@ -630,7 +625,7 @@ class AutoEncoder(nn.Module):
             else:
                 s = cell(s)
 
-        return chunks, mu_x, mu_z, sampled_mu_x, sampled_mu_z
+        return chunks, normalized_chunks
 
     def decode(self, chunks: list):
 
