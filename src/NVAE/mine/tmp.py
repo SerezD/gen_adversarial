@@ -1,3 +1,4 @@
+# code adapted from https://github.com/mgp123/nvae/blob/main/model/distributions.py
 import torch
 from einops import rearrange, repeat
 from torch.nn import functional as F
@@ -14,6 +15,7 @@ def one_hot(indices, depth, dim):
 
     return y_onehot
 
+
 @torch.jit.script
 def soft_clamp(x: torch.Tensor, n: float = 5.):
     """
@@ -26,6 +28,15 @@ def soft_clamp(x: torch.Tensor, n: float = 5.):
     """
     return x.div(n).tanh_().mul(n)
 
+
+# pytorch example for Logistic Distribution --> https://pytorch.org/docs/stable/distributions.html
+# why the logistic distribution does not exist in pytorch? --> https://github.com/pytorch/pytorch/issues/7857
+# using logistic normal as base, then transform it when mean, scale parameters are picked.
+base_distribution = torch.distributions.Uniform(1e-5, 1 - 1e-5)  # avoiding corner values
+transforms = [torch.distributions.SigmoidTransform().inv]
+base_logistic = torch.distributions.TransformedDistribution(base_distribution, transforms)
+
+
 class DiscMixLogistic:
 
     def __init__(self, params: torch.Tensor, num_bits: int = 8):
@@ -37,7 +48,7 @@ class DiscMixLogistic:
         """
 
         # hyperparams
-        b, N, img_channels, h, w = params.shape
+        self.b, N, self.img_channels, self.h, self.w = params.shape
         self.num_mixtures = N // 3
         self.max_val = 2. ** num_bits - 1
 
@@ -99,52 +110,31 @@ class DiscMixLogistic:
     def sample(self):
 
         # B, (C H W) of indices in range 0 __ N_MIXTURES
-        logistic_selection_mask = torch.distributions.Categorical(logits=self.logistic_logits.permute(0, 2, 1)).sample()                                                         # B, 1, M, H, W
+        logistic_selection_mask = torch.distributions.Categorical(logits=self.logistic_logits.permute(0, 2, 1)).sample()
 
-        torch.distributions.LogisticNormal
-        # select logistic parameters
-        # means = torch.sum(self.means * sel, dim=2)                                             # B, 3, H, W
-        # log_scales = torch.sum(self.log_scales * sel, dim=2)                                   # B, 3, H, W
-        # coeffs = torch.sum(self.logistic_probs * sel, dim=2)                                           # B, 3, H, W
-        #
-        # # cells from logistic & clip to interval
-        # # we don't actually round to the nearest 8bit value when sampling
-        # u = torch.Tensor(means.size()).uniform_(1e-5, 1. - 1e-5).cuda()                        # B, 3, H, W
-        # x = means + torch.exp(log_scales) / t * (torch.log(u) - torch.log(1. - u))             # B, 3, H, W
-        #
-        # x0 = torch.clamp(x[:, 0, :, :], -1, 1.)                                                # B, H, W
-        # x1 = torch.clamp(x[:, 1, :, :] + coeffs[:, 0, :, :] * x0, -1, 1)                       # B, H, W
-        # x2 = torch.clamp(x[:, 2, :, :] + coeffs[:, 1, :, :] * x0 + coeffs[:, 2, :, :] * x1, -1, 1)  # B, H, W
-        #
-        # x0 = x0.unsqueeze(1)
-        # x1 = x1.unsqueeze(1)
-        # x2 = x2.unsqueeze(1)
-        #
-        # x = torch.cat([x0, x1, x2], 1)
-        # x = x / 2. + 0.5
-        # return x
+        # select parameters (B, (C H W))
+        selected_mu = torch.gather(self.means_logits, 1, logistic_selection_mask.unsqueeze(1)).squeeze(1)
+        selected_scale = torch.gather(self.log_scales_logits, 1, logistic_selection_mask.unsqueeze(1)).squeeze(1)
+
+        # sample and transform
+        x = selected_mu + torch.exp(selected_scale) * base_logistic.sample(sample_shape=selected_mu.shape)
+
+        # move to 0-1 range
+        x = (x + 1) / 2
+
+        return rearrange(x, 'b (c h w) -> b c h w', c=self.img_channels, h=self.h, w=self.w)
 
     def mean(self):
-        sel = torch.softmax(self.logit_probs, dim=1)                                           # B, M, H, W
-        sel = sel.unsqueeze(1)                                                                 # B, 1, M, H, W
 
-        # select logistic parameters
-        means = torch.sum(self.means * sel, dim=2)                                             # B, 3, H, W
-        coeffs = torch.sum(self.logistic_probs * sel, dim=2)                                           # B, 3, H, W
+        # just scale means by their corresponding probs
+        probs = torch.softmax(self.log_scales_logits, dim=1)
+        res = self.means_logits * probs
+        res = torch.sum(res, dim=1)
 
-        # we don't sample from logistic components, because of the linear dependencies, we use mean
-        x = means                                                                              # B, 3, H, W
-        x0 = torch.clamp(x[:, 0, :, :], -1, 1.)                                                # B, H, W
-        x1 = torch.clamp(x[:, 1, :, :] + coeffs[:, 0, :, :] * x0, -1, 1)                       # B, H, W
-        x2 = torch.clamp(x[:, 2, :, :] + coeffs[:, 1, :, :] * x0 + coeffs[:, 2, :, :] * x1, -1, 1)  # B, H, W
+        # normalize 0__1 range
+        res = (res + 1) / 2
 
-        x0 = x0.unsqueeze(1)
-        x1 = x1.unsqueeze(1)
-        x2 = x2.unsqueeze(1)
-
-        x = torch.cat([x0, x1, x2], 1)
-        x = x / 2. + 0.5
-        return x
+        return rearrange(res, 'b (c h w) -> b c h w', c=self.img_channels, h=self.h, w=self.w)
 
 
 if __name__ == '__main__':
@@ -160,5 +150,5 @@ if __name__ == '__main__':
     # loss = - torch.sum(recon, dim=[1, 2])  # summation over RGB is done.
 
     # sampling.
-    img = disc_mixture.sample()
+    # img = disc_mixture.sample()
     # img2 = disc_mixture.mean()
