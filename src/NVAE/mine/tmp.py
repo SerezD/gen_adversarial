@@ -1,4 +1,5 @@
 # code adapted from https://github.com/mgp123/nvae/blob/main/model/distributions.py
+# to understand the Mixture of Logistics, check https://github.com/Rayhane-mamah/Tacotron-2/issues/155
 import torch
 from einops import rearrange, repeat
 from torch.nn import functional as F
@@ -75,13 +76,11 @@ class DiscMixLogistic:
         samples = 2 * samples - 1.0
 
         # expand with num mixtures
-        samples = repeat(samples, 'b c h w -> b c M h w', M=self.num_mixtures)
-
-        # center samples given means of each Logistic
-        centered = samples - self.means
+        samples = repeat(samples, 'b c h w -> b n (c h w)', n=self.num_mixtures)
 
         # compute CDF
-        neg_scale = torch.exp(- self.log_scales)
+        centered = samples - self.means_logits
+        neg_scale = torch.exp(- self.log_scales_logits)
 
         plus_in = neg_scale * (centered + 1. / self.max_val)
         cdf_plus = torch.sigmoid(plus_in)
@@ -89,23 +88,27 @@ class DiscMixLogistic:
         min_in = neg_scale * (centered - 1. / self.max_val)
         cdf_min = torch.sigmoid(min_in)
 
+        # CDF in the neighborhood of each sample
         cdf_delta = cdf_plus - cdf_min
 
+        # Special cases (around black and white pixel values)
         log_cdf_plus = plus_in - F.softplus(plus_in)
         log_one_minus_cdf_min = - F.softplus(min_in)
-        mid_in = inverted_scale * centered
-        log_pdf_mid = mid_in - self.log_scales - 2. * F.softplus(mid_in)
+
+        mid_in = neg_scale * centered
+        log_pdf_mid = mid_in - self.log_scales_logits - 2. * F.softplus(mid_in)
 
         log_prob_mid_safe = torch.where(cdf_delta > 1e-5,
                                         torch.log(torch.clamp(cdf_delta, min=1e-10)),
                                         log_pdf_mid - np.log(self.max_val / 2))
+
         # the original implementation uses samples > 0.999, this ignores the largest possible pixel value (255)
         # which is mapped to 0.9922
-        log_probs = torch.where(samples < -0.999, log_cdf_plus, torch.where(samples > 0.99, log_one_minus_cdf_min,
-                                                                            log_prob_mid_safe))   # B, 3, M, H, W
+        log_probs = torch.where(samples < -0.999, log_cdf_plus,
+                                torch.where(samples > 0.99, log_one_minus_cdf_min, log_prob_mid_safe))
 
-        log_probs = torch.sum(log_probs, 1) + F.log_softmax(self.logit_probs, dim=1)  # B, M, H, W
-        return torch.logsumexp(log_probs, dim=1)                                      # B, H, W
+        log_probs = torch.sum(log_probs, 1) + F.log_softmax(self.logistic_logits, dim=1)
+        return torch.logsumexp(log_probs, dim=1)
 
     def sample(self):
 
@@ -146,7 +149,7 @@ if __name__ == '__main__':
     disc_mixture = DiscMixLogistic(logits, num_bits)
 
     # training.
-    # recon = disc_mixture.log_prob(gt)
+    recon = disc_mixture.log_prob(gt)
     # loss = - torch.sum(recon, dim=[1, 2])  # summation over RGB is done.
 
     # sampling.
