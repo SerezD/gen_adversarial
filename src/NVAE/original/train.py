@@ -37,7 +37,7 @@ def main(args):
     train_queue, valid_queue, num_classes = datasets.get_loaders(args)
     args.num_total_iter = len(train_queue) * args.epochs
     warmup_iters = len(train_queue) * args.warmup_epochs
-    swa_start = len(train_queue) * (args.epochs - 1)
+    # swa_start = len(train_queue) * (args.epochs - 1)
 
     arch_instance = utils.get_arch_cells(args.arch_instance)
 

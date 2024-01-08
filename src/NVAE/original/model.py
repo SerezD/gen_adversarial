@@ -59,7 +59,7 @@ class Cell(nn.Module):
 class CellAR(nn.Module):
     def __init__(self, num_z, num_ftr, num_c, arch, mirror):
         super(CellAR, self).__init__()
-        assert num_c % num_z == 0
+        # assert num_c % num_z == 0
 
         self.cell_type = 'ar_nn'
 
