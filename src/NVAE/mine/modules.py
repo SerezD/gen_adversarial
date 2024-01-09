@@ -7,6 +7,47 @@ from torch.nn.utils.parametrizations import weight_norm
 from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 
+class Conv2D(nn.Conv2d):
+    """
+    Custom implementation with weight normalization.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1,
+                 padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = False, weight_norm: bool = True):
+
+        super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
+
+        self.log_weight_norm = None
+
+        if weight_norm:
+            init = torch.sqrt(torch.sum(self.weight ** 2, dim=[1, 2, 3])).view(-1, 1, 1, 1)
+            self.log_weight_norm = nn.Parameter(torch.log(init + 1e-2), requires_grad=True)
+
+        self.weight_normalized = self.normalize_weight()
+
+    def forward(self, x):
+
+        self.weight_normalized = self.normalize_weight()
+        return nn.functional.conv2d(x, self.weight_normalized, self.bias, self.stride,
+                                    self.padding, self.dilation, self.groups)
+
+    def normalize_weight(self):
+        """ applies weight normalization """
+        @torch.jit.script
+        def normalize_weight_jit(log_weight_norm, weight):
+            n = torch.exp(log_weight_norm)
+            wn = torch.sqrt(torch.sum(weight * weight, dim=[1, 2, 3]))  # norm(w)
+            weight = n * weight / (wn.view(-1, 1, 1, 1) + 1e-5)
+            return weight
+
+        if self.log_weight_norm is not None:
+            weight = normalize_weight_jit(self.log_weight_norm, self.weight)
+        else:
+            weight = self.weight
+
+        return weight
+
+
 class SE(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         """
@@ -44,11 +85,11 @@ class SkipDown(nn.Module):
 
         super().__init__()
 
-        self.conv_1 = weight_norm(nn.Conv2d(in_channels, out_channels // 4, kernel_size=1, stride=stride))
-        self.conv_2 = weight_norm(nn.Conv2d(in_channels, out_channels // 4, kernel_size=1, stride=stride))
-        self.conv_3 = weight_norm(nn.Conv2d(in_channels, out_channels // 4, kernel_size=1, stride=stride))
-        self.conv_4 = weight_norm(nn.Conv2d(in_channels, out_channels - 3 * (out_channels // 4),
-                                            kernel_size=1, stride=stride))
+        self.conv_1 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, weight_norm=True)
+        self.conv_2 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, weight_norm=True)
+        self.conv_3 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, weight_norm=True)
+        self.conv_4 = Conv2D(in_channels, out_channels - 3 * (out_channels // 4), kernel_size=1,
+                             stride=stride, weight_norm=True)
 
     def forward(self, x):
         out = torch.nn.functional.silu(x)
@@ -64,7 +105,7 @@ class SkipUp(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int, stride: int):
         super().__init__()
-        self.conv = weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride))
+        self.conv = Conv2D(in_channels, out_channels, kernel_size=1, stride=stride, weight_norm=True)
 
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
@@ -96,9 +137,9 @@ class ResidualCellEncoder(nn.Module):
         # downsampling in the first conv, depending on stride
         self.residual = nn.Sequential(
             SyncBatchNormSwish(in_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
-            weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)),
+            Conv2D(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, weight_norm=True),
             SyncBatchNormSwish(out_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
-            weight_norm(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1))
+            Conv2D(out_channels, out_channels, kernel_size=3, stride=1, padding=1, weight_norm=True)
         )
 
         if use_SE:
@@ -138,11 +179,11 @@ class ResidualCellDecoder(nn.Module):
         residual = [nn.UpsamplingNearest2d(scale_factor=2)] if upsampling else []
         residual += [
             nn.SyncBatchNorm(in_channels, eps=1e-5, momentum=0.05),
-            nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=False),
+            Conv2D(in_channels, hidden_dim, kernel_size=1, bias=False, weight_norm=False),
             SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, padding=2, groups=hidden_dim, bias=False),
+            Conv2D(hidden_dim, hidden_dim, kernel_size=5, padding=2, groups=hidden_dim, bias=False, weight_norm=False),
             SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
-            nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=False),
+            Conv2D(hidden_dim, out_channels, kernel_size=1, bias=False, weight_norm=False),
             nn.SyncBatchNorm(out_channels, eps=1e-5, momentum=0.05)
         ]
 
@@ -163,7 +204,7 @@ class EncCombinerCell(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
 
-        self.conv = weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=1))
+        self.conv = Conv2D(in_channels, out_channels, kernel_size=1, weight_norm=True)
 
     def forward(self, x_enc, x_dec):
         """
@@ -183,7 +224,7 @@ class DecCombinerCell(nn.Module):
 
         super().__init__()
 
-        self.conv = weight_norm(nn.Conv2d(feature_channels + z_channels, out_channels, kernel_size=1))
+        self.conv = Conv2D(feature_channels + z_channels, out_channels, kernel_size=1, weight_norm=True)
 
     def forward(self, x, z):
         out = torch.cat([x, z], dim=1)

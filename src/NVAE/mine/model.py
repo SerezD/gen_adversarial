@@ -6,7 +6,9 @@ import torch
 from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
 
-from src.NVAE.mine.modules import ResidualCellEncoder, EncCombinerCell, NFBlock, ResidualCellDecoder, DecCombinerCell
+from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
+from src.NVAE.mine.modules import ResidualCellEncoder, EncCombinerCell, NFBlock, ResidualCellDecoder, DecCombinerCell, \
+    ARConv2d, Conv2D
 from src.NVAE.mine.distributions import Normal
 
 
@@ -21,7 +23,7 @@ class AutoEncoder(nn.Module):
 
         # ######################################################################################
         # general params
-        self.image_resolution, _, self.img_channels = resolution
+        self.img_channels, self.image_resolution, _  = resolution
         self.base_channels, self.ch_multiplier = ae_args['initial_channels'], 1
         self.use_SE = use_SE
 
@@ -51,6 +53,13 @@ class AutoEncoder(nn.Module):
         self.num_nf_cells = ae_args['num_nf_cells']
         self.use_nf = self.num_nf_cells is not None
 
+        # loss coefficients
+        kl_alpha = [(2 ** i) ** 2 / self.groups_per_scale[self.num_scales - i - 1] *
+                    torch.ones(self.groups_per_scale[self.num_scales - i - 1])
+                    for i in range(self.num_scales)]
+        kl_alpha = torch.cat(kl_alpha, dim=0)
+        self.kl_alpha = kl_alpha / torch.min(kl_alpha)  # normalize to min 1
+
         # ######################################################################################
         # initial learned constant
         self.scaling_factor = 2 ** (self.n_preprocessing_blocks + self.num_scales - 1)
@@ -70,6 +79,11 @@ class AutoEncoder(nn.Module):
 
         self.to_logits = self._init_to_logits()
 
+        # ######################################################################################
+
+        # compute values for spectral and batch norm regularization
+        self._count_conv_and_batch_norm_layers()
+
     def _init_preprocessing(self):
         """
         Returns the preprocessing module, structured as:
@@ -79,8 +93,8 @@ class AutoEncoder(nn.Module):
         """
 
         preprocessing = OrderedDict()
-        preprocessing['init_conv'] = weight_norm(
-            nn.Conv2d(self.img_channels, self.base_channels, kernel_size=3, padding=1, bias=True))
+        preprocessing['init_conv'] = Conv2D(self.img_channels, self.base_channels, kernel_size=3, padding=1,
+                                            bias=True, weight_norm=True)
 
         for b in range(self.n_preprocessing_blocks):
 
@@ -159,7 +173,7 @@ class AutoEncoder(nn.Module):
         channels = int(self.base_channels * self.ch_multiplier)
         encoder_0 = nn.Sequential(
             nn.ELU(),
-            weight_norm(nn.Conv2d(channels, channels, kernel_size=1, bias=True)),
+            Conv2D(channels, channels, kernel_size=1, bias=True, weight_norm=True),
             nn.ELU())
 
         return encoder_tower, encoder_combiners, encoder_0
@@ -184,8 +198,8 @@ class AutoEncoder(nn.Module):
 
                 # encoder sampler
                 enc_sampler.add_module(f'sampler_{s}:{g}',
-                                       weight_norm(nn.Conv2d(channels, 2 * self.num_latent_per_group,
-                                                             kernel_size=3, padding=1, bias=True)))
+                                       Conv2D(channels, 2 * self.num_latent_per_group,
+                                              kernel_size=3, padding=1, bias=True, weight_norm=True))
 
                 # build [optional] NF
                 this_nf_blocks = []
@@ -198,9 +212,8 @@ class AutoEncoder(nn.Module):
                     dec_sampler.add_module(f'sampler_{s}:{g}',
                                            nn.Sequential(
                                                nn.ELU(),
-                                               weight_norm(
-                                                   nn.Conv2d(channels, 2 * self.num_latent_per_group,
-                                                             kernel_size=1, padding=0, bias=True))
+                                               Conv2D(channels, 2 * self.num_latent_per_group,
+                                                         kernel_size=1, padding=0, bias=True, weight_norm=True)
                                            )
                                            )
 
@@ -281,10 +294,92 @@ class AutoEncoder(nn.Module):
 
         to_logits = nn.Sequential(
             nn.ELU(),
-            weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=True))
+            Conv2D(in_channels, out_channels, kernel_size=3, padding=1, bias=True, weight_norm=True)
         )
 
         return to_logits
+
+    def _count_conv_and_batch_norm_layers(self):
+        """
+        collect all norm params in Conv2D and gamma param in batch norm for training regularization
+        """
+
+        self.all_log_norm = []
+        self.all_conv_layers = []
+        self.all_bn_layers = []
+
+        for n, layer in self.named_modules():
+
+            if isinstance(layer, Conv2D) or isinstance(layer, ARConv2d):
+                self.all_log_norm.append(layer.log_weight_norm)
+                self.all_conv_layers.append(layer)
+
+            if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm) or \
+                    isinstance(layer, SyncBatchNormSwish):
+                self.all_bn_layers.append(layer)
+
+        # left/right singular vectors used for SR
+        self.sr_u = {}
+        self.sr_v = {}
+        self.num_power_iter = 4
+
+    def spectral_norm_parallel(self):
+        """
+        This method computes spectral normalization for all conv layers in parallel.
+        This method should be called after calling the forward method of all the conv layers in each iteration.
+        Will be multiplied by λ coefficient
+        """
+
+        weights = {}   # a dictionary indexed by the shape of weights
+        for l in self.all_conv_layers:
+            weight = l.weight_normalized
+            weight_mat = weight.view(weight.size(0), -1)
+            if weight_mat.shape not in weights:
+                weights[weight_mat.shape] = []
+
+            weights[weight_mat.shape].append(weight_mat)
+
+        loss = 0
+        for i in weights:
+            weights[i] = torch.stack(weights[i], dim=0)
+            with torch.no_grad():
+                num_iter = self.num_power_iter
+                if i not in self.sr_u:
+                    num_w, row, col = weights[i].shape
+                    self.sr_u[i] = nn.functional.normalize(
+                        torch.ones((num_w, row), device=weights[i].device).normal_(0, 1),
+                        dim=1, eps=1e-3)
+
+                    self.sr_v[i] = nn.functional.normalize(
+                        torch.ones((num_w, col), device=weights[i].device).normal_(0, 1),
+                         dim=1, eps=1e-3)
+
+                    # increase the number of iterations for the first time
+                    num_iter = 10 * self.num_power_iter
+
+                for j in range(num_iter):
+                    # Spectral norm of weight equals to `u^T W v`, where `u` and `v`
+                    # are the first left and right singular vectors.
+                    # This power iteration produces approximations of `u` and `v`.
+                    self.sr_v[i] = nn.functional.normalize(
+                        torch.matmul(self.sr_u[i].unsqueeze(1), weights[i]).squeeze(1), dim=1, eps=1e-3)
+                    self.sr_u[i] = nn.functional.normalize(
+                        torch.matmul(weights[i], self.sr_v[i].unsqueeze(2)).squeeze(2), dim=1, eps=1e-3)
+
+            sigma = torch.matmul(self.sr_u[i].unsqueeze(1), torch.matmul(weights[i], self.sr_v[i].unsqueeze(2)))
+            loss += torch.sum(sigma)
+        return loss
+
+    def batch_norm_loss(self):
+        """
+        batch norm regularization term (also multiplied by λ)
+        """
+        loss = 0
+        for l in self.all_bn_layers:
+            if l.affine:
+                loss += torch.max(torch.abs(l.weight))
+
+        return loss
 
     def forward(self, gt_images: torch.Tensor):
         """
@@ -462,6 +557,110 @@ class AutoEncoder(nn.Module):
                     # sample z_i
                     dist = Normal(mu_p, log_sig_p)
                     z_i, _ = dist.sample()
+
+                    # combine x and z_i
+                    x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
+
+            # upsampling at the end of each scale
+            if s < self.num_scales - 1:
+                x = scale.get_submodule('upsampling')(x)
+
+        # postprocessing phase
+        x = self.postprocessing_block(x)
+
+        # get logits for mixture
+        logits = self.to_logits(x)
+        logits = rearrange(logits, 'b (n c) h w -> b n c h w', n=self.num_mixtures * 3, c=self.img_channels)
+
+        return logits
+
+    def autoencode(self, gt_images: torch.Tensor):
+        """
+        :param gt_images: images in 0__1 range
+        :return:
+        """
+
+        b = gt_images.shape[0]
+
+        # preprocessing phase
+        normalized_images = (gt_images * 2) - 1.0  # in range -1 1
+        x = self.preprocessing_block(normalized_images)
+
+        # encoding tower phase
+        encoder_combiners_x = {}
+
+        for s in range(self.num_scales - 1, -1, -1):
+
+            scale = self.encoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                group = scale.get_submodule(f'group_{g}')
+
+                for c in range(self.num_cells_per_group):
+                    x = group.get_submodule(f'cell_{c}')(x)
+
+                # add intermediate x (will be used as combiner input for this scale)
+                if not (s == 0 and g == 0):
+                    encoder_combiners_x[f'{s}:{g}'] = x
+
+            if s > 0:
+                x = scale.get_submodule(f'downsampling')(x)
+
+        # encoder 0
+        x = self.encoder_0(x)
+
+        # obtain q(z_0|x), p(z_0) for KL loss, sample z_0
+
+        # encoder q(z_0|x)
+        mu_q, log_sig_q = torch.chunk(self.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
+        dist = Normal(mu_q, log_sig_q)
+        z_0, _ = dist.sample()  # uses reparametrization trick
+
+        # apply normalizing flows
+        if self.use_nf:
+            z_0 = self.nf_cells.get_submodule('nf_0:0')(z_0)
+
+        # decoding phase
+
+        # start from constant prior
+        x = self.const_prior.expand(b, -1, -1, -1)
+
+        # first combiner (inject z_0)
+        x = self.decoder_combiners.get_submodule('combiner_0:0')(x, z_0)
+
+        for s in range(self.num_scales):
+
+            scale = self.decoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                if not (s == 0 and g == 0):
+
+                    # group forward
+                    group = scale.get_submodule(f'group_{g}')
+
+                    for c in range(self.num_cells_per_group):
+                        x = group.get_submodule(f'cell_{c}')(x)
+
+                    # obtain q(z_i|x, z_l>i), p(z_i|z_l>i) for KL loss, sample z_i
+                    # extract params for p (conditioned on previous decoding)
+                    mu_p, log_sig_p = torch.chunk(self.dec_sampler.get_submodule(f'sampler_{s}:{g}')(x), 2, dim=1)
+
+                    # extract params for q (conditioned on encoder features and previous decoding)
+                    enc_combiner = self.encoder_combiners.get_submodule(f'combiner_{s}:{g}')
+                    enc_sampler = self.enc_sampler.get_submodule(f'sampler_{s}:{g}')
+                    mu_q, log_sig_q = torch.chunk(
+                        enc_sampler(enc_combiner(encoder_combiners_x[f'{s}:{g}'], x)),
+                        2, dim=1)
+
+                    # sample z_i as combination of encoder and decoder params
+                    dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
+                    z_i, _ = dist.sample()
+
+                    # apply NF
+                    if self.use_nf:
+                        z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
 
                     # combine x and z_i
                     x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)

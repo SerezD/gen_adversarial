@@ -146,7 +146,8 @@ class DiscMixLogistic:
         selected_scale = torch.gather(self.log_scales_logits, 1, logistic_selection_mask.unsqueeze(1)).squeeze(1)
 
         # sample and transform
-        x = selected_mu + torch.exp(selected_scale) * base_logistic.sample(sample_shape=selected_mu.shape)
+        base_sample = base_logistic.sample(sample_shape=selected_mu.shape).to(selected_mu.device)
+        x = selected_mu + torch.exp(selected_scale) * base_sample
 
         # move to 0-1 range
         x = (x + 1) / 2
