@@ -4,7 +4,6 @@ from einops import rearrange
 
 import torch
 from torch import nn
-from torch.nn.utils.parametrizations import weight_norm
 
 from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
 from src.NVAE.mine.modules import ResidualCellEncoder, EncCombinerCell, NFBlock, ResidualCellDecoder, DecCombinerCell, \
@@ -202,10 +201,11 @@ class AutoEncoder(nn.Module):
                                               kernel_size=3, padding=1, bias=True, weight_norm=True))
 
                 # build [optional] NF
-                this_nf_blocks = []
-                for n in range(self.num_nf_cells):
-                    this_nf_blocks.append(NFBlock(self.num_latent_per_group))
-                nf_cells.add_module(f'nf_{s}:{g}', torch.nn.Sequential(*this_nf_blocks))
+                if self.use_nf:
+                    this_nf_blocks = []
+                    for n in range(self.num_nf_cells):
+                        this_nf_blocks.append(NFBlock(self.num_latent_per_group))
+                    nf_cells.add_module(f'nf_{s}:{g}', torch.nn.Sequential(*this_nf_blocks))
 
                 # decoder samplers (first group uses standard gaussian)
                 if not (s == 0 and g == 0):
@@ -522,12 +522,12 @@ class AutoEncoder(nn.Module):
 
         return logits, log_q_sum, log_p_sum, kl_all, kl_diag
 
-    def sample(self, num_samples: int, temperature: float):
+    def sample(self, num_samples: int, temperature: float, device: str = 'cpu'):
 
         # sample z_0
         samples_shape = (num_samples, self.num_latent_per_group,
                          self.image_resolution // self.scaling_factor, self.image_resolution // self.scaling_factor)
-        dist = Normal(mu=torch.zeros(samples_shape).cuda(), log_sigma=torch.zeros(samples_shape).cuda(),
+        dist = Normal(mu=torch.zeros(samples_shape, device=device), log_sigma=torch.zeros(samples_shape, device=device),
                       temp=temperature)
         z_0, _ = dist.sample()
 

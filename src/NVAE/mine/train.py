@@ -7,6 +7,7 @@ import wandb
 import numpy as np
 
 import torch
+from einops import pack
 from scheduling_utils.schedulers_cpp import LinearCosineScheduler, CosineScheduler
 from torch.cuda.amp import autocast, GradScaler
 import torch.multiprocessing as mp
@@ -57,7 +58,7 @@ def parse_args():
         raise FileNotFoundError(f'{args.data_path}/train or {args.data_path}/validation does not exist')
 
     # check checkpoint file exists
-    if args.resume_from is not None and not os.path.exists(f'{args.resume_from}/'):
+    if args.resume_from is not None and not os.path.exists(f'{args.resume_from}'):
         raise FileNotFoundError(f'could not find the specified checkpoint: {args.resume_from}')
 
     # create checkpoint out directory
@@ -80,7 +81,7 @@ def get_model_conf(filepath: str):
 def setup(rank: int, world_size: int, train_conf: dict):
 
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '12345'
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -113,12 +114,10 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=False, num_workers=0,
                                 drop_last=False, sampler=val_sampler)
 
-    bpd_coefficient = 1. / np.log(2.) / (conf['resolution'][0] * conf['resolution'][1] * conf['resolution'][2])
     if rank == 0:
         print(f"[INFO] final batch size per device: {batch_size}")
-        print(f"[INFO] Bit Per Dimension (bpd) coefficient: {bpd_coefficient}")
 
-    return train_dataloader, val_dataloader, bpd_coefficient
+    return train_dataloader, val_dataloader
 
 
 def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.optim.Optimizer, scheduler: Any,
@@ -139,11 +138,8 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
     :param run: wandb run object (if rank is 0).
     """
 
-    epoch_loss = []
-    epoch_recon_loss = []
-    epoch_kl_loss = []
-    epoch_spectral_loss = []
-    epoch_bn_loss = []
+    # for logging: loss, rec, kl, spectral, bn
+    epoch_losses = torch.empty((0, 5), device=f"cuda:{rank}")
 
     for step, x in enumerate(tqdm(dataloader)):
 
@@ -189,7 +185,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
 
             # add spectral regularization and batch norm regularization terms to loss
             spectral_norm_term = model.spectral_norm_parallel()
-            batch_norm_term = model. model.batch_norm_loss()
+            batch_norm_term = model.batch_norm_loss()
             loss += lambda_coeff * spectral_norm_term + lambda_coeff * batch_norm_term
 
         grad_scalar.scale(loss).backward()
@@ -200,50 +196,40 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
         if rank == 0:
 
             log_dict = {'lr': lr, 'KL beta': kl_weight, 'Lambda': lambda_coeff}
-            for i, v in enumerate(kl_coefficients.cpu().numpy()):
+            for i, v in enumerate(kl_coefficients.detach().cpu().numpy()):
                 log_dict[f'KL gamma {i}'] = v
 
             run.log(log_dict, step=global_step)
 
         # save all loss terms to rank 0
+        losses = torch.stack(
+            [loss, rec_loss.mean(), final_kl.mean(), spectral_norm_term * lambda_coeff, batch_norm_term * lambda_coeff],
+            dim=0).detach()
+
         if not rank == 0:
-            dist.gather(tensor=loss.detach(), dst=0)
-            dist.gather(tensor=rec_loss.detach(), dst=0)
-            dist.gather(tensor=final_kl.detach(), dst=0)
-            dist.gather(tensor=spectral_norm_term.detach() * lambda_coeff, dst=0)
-            dist.gather(tensor=batch_norm_term.detach() * lambda_coeff, dst=0)
+            dist.gather(tensor=losses, dst=0)
         else:
+            batch_losses = [torch.zeros_like(losses) for _ in range(world_size)]
+            dist.gather(gather_list=batch_losses, tensor=losses)
 
-            batch_loss = [torch.zeros_like(loss) for _ in range(world_size)]
-            batch_recon_loss = [torch.zeros_like(rec_loss) for _ in range(world_size)]
-            batch_kl_loss = [torch.zeros_like(final_kl) for _ in range(world_size)]
-            batch_spectral_loss = [torch.zeros_like(spectral_norm_term) for _ in range(world_size)]
-            batch_bn_loss = [torch.zeros_like(batch_norm_term) for _ in range(world_size)]
-
-            dist.gather(gather_list=batch_loss, tensor=loss.detach())
-            dist.gather(gather_list=batch_recon_loss, tensor=rec_loss.detach())
-            dist.gather(gather_list=batch_kl_loss, tensor=final_kl.detach())
-            dist.gather(gather_list=batch_spectral_loss, tensor=spectral_norm_term.detach() * lambda_coeff)
-            dist.gather(gather_list=batch_bn_loss, tensor=batch_norm_term.detach() * lambda_coeff)
-
-            # get full Batch mean losses for iteration.
-            epoch_loss.append(torch.mean(torch.cat(batch_loss, dim=0)).item())
-            epoch_recon_loss.append(torch.mean(torch.cat(batch_recon_loss, dim=0)).item())
-            epoch_kl_loss.append(torch.mean(torch.cat(batch_kl_loss, dim=0)).item())
-            epoch_spectral_loss.append(torch.mean(torch.cat(batch_spectral_loss, dim=0)).item())
-            epoch_bn_loss.append(torch.mean(torch.cat(batch_bn_loss, dim=0)).item())
+            # loss, rec, kl, spectral, bn
+            epoch_losses , _ = pack([epoch_losses, torch.mean(torch.stack(batch_losses, dim=0), dim=0).unsqueeze(0)],
+                                    '* n')
 
         global_step += 1
 
     # log epoch loss
     if rank == 0:
+
+        epoch_losses = torch.mean(epoch_losses, dim=0)
+
         run.log(
             {
-                "train/loss": sum(epoch_loss) / len(epoch_loss),
-                "train/recon_loss": sum(epoch_recon_loss) / len(epoch_recon_loss),
-                "train/kl_loss": sum(epoch_kl_loss) / len(epoch_kl_loss),
-                "train/spectral_loss": sum(epoch_spectral_loss) / len(epoch_spectral_loss),
-                "train/bn_loss": sum(epoch_bn_loss) / len(epoch_bn_loss)
+                "train/loss": epoch_losses[0].item(),
+                "train/recon_loss": epoch_losses[1].item(),
+                "train/kl_loss": epoch_losses[2].item(),
+                "train/spectral_loss": epoch_losses[3].item(),
+                "train/bn_loss": epoch_losses[4].item()
             },
             step=global_step
         )
@@ -254,9 +240,8 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
 def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: int,
                      rank: int, world_size: int, run: wandb.run = None):
 
-    epoch_loss = []
-    epoch_recon_loss = []
-    epoch_kl_loss = []
+    # for logging: loss, rec, kl
+    epoch_losses = torch.empty((0, 3), device=f"cuda:{rank}")
 
     for step, x in enumerate(tqdm(dataloader)):
 
@@ -274,35 +259,31 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         loss = rec_loss + final_kl
 
         # save all loss terms to rank 0
+        losses = torch.stack([loss.mean(), rec_loss.mean(), final_kl.mean()], dim=0)
+
         if not rank == 0:
-            dist.gather(tensor=loss.detach(), dst=0)
-            dist.gather(tensor=rec_loss.detach(), dst=0)
-            dist.gather(tensor=final_kl.detach(), dst=0)
+            dist.gather(tensor=losses, dst=0)
         else:
-
-            batch_loss = [torch.zeros_like(loss) for _ in range(world_size)]
-            batch_recon_loss = [torch.zeros_like(rec_loss) for _ in range(world_size)]
-            batch_kl_loss = [torch.zeros_like(final_kl) for _ in range(world_size)]
-
-            dist.gather(gather_list=batch_loss, tensor=loss.detach())
-            dist.gather(gather_list=batch_recon_loss, tensor=rec_loss.detach())
-            dist.gather(gather_list=batch_kl_loss, tensor=final_kl.detach())
+            batch_losses = [torch.zeros_like(losses) for _ in range(world_size)]
+            dist.gather(gather_list=batch_losses, tensor=losses)
 
             # get full Batch mean losses for iteration.
-            epoch_loss.append(torch.mean(torch.cat(batch_loss, dim=0)).item())
-            epoch_recon_loss.append(torch.mean(torch.cat(batch_recon_loss, dim=0)).item())
-            epoch_kl_loss.append(torch.mean(torch.cat(batch_kl_loss, dim=0)).item())
+            epoch_losses, _ = pack([epoch_losses, torch.mean(torch.stack(batch_losses, dim=0), dim=0).unsqueeze(0)],
+                                   '* n')
 
     # log epoch loss
     if rank == 0:
+
+        epoch_losses = torch.mean(epoch_losses, dim=0)
         run.log(
             {
-                "validation/loss": sum(epoch_loss) / len(epoch_loss),
-                "validation/recon_loss": sum(epoch_recon_loss) / len(epoch_recon_loss),
-                "validation/kl_loss": sum(epoch_kl_loss) / len(epoch_kl_loss),
+                "validation/loss": epoch_losses[0].item(),
+                "validation/recon_loss": epoch_losses[1].item(),
+                "validation/kl_loss": epoch_losses[2].item(),
             },
             step=global_step
         )
+
 
 def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
@@ -322,15 +303,31 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
     setup(rank, world_size, train_conf)
 
     # Get data loaders.
-    train_loader, val_loader, bpd_coefficient = prepare_data(rank, world_size, args.data_path, config)
+    train_loader, val_loader = prepare_data(rank, world_size, args.data_path, config)
 
     # create model and move it to GPU with id rank
     model = AutoEncoder(config['autoencoder'], config['resolution']).to(rank)
 
-    if rank == 0:
-        print(summary(model, torch.zeros((1,) + tuple(config['resolution']), device=f'cuda:{rank}'), show_input=False))
+    # load checkpoint if resume
+    if args.resume_from is not None:
 
-    ddp_model = DDP(model, device_ids=[rank])
+        if rank == 0:
+            print(f'[INFO] Loading checkpoint from: {args.resume_from}')
+
+        checkpoint = torch.load(args.resume_from, map_location=f'cuda:{rank}')
+        model.load_state_dict(checkpoint['state_dict'])
+        global_step = checkpoint['global_step']
+        init_epoch = checkpoint['epoch']
+
+        if rank == 0:
+            print(f'[INFO] Start from Epoch: {init_epoch} - Step: {global_step}')
+
+    else:
+        global_step, init_epoch = 0, 0
+
+        if rank == 0:
+            print(summary(model, torch.zeros((1,) + tuple(config['resolution']), device=f'cuda:{rank}'),
+                          show_input=False))
 
     # find final learning rate
     base_learning_rate = float(train_conf['base_lr'])
@@ -345,7 +342,8 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
         print(f'[INFO] final learning rate: {final_learning_rate}')
         print(f'[INFO] final min learning rate: {final_min_learning_rate}')
 
-    # optimizer, scheduler, scaler
+    # ddp model, optimizer, scheduler, scaler
+    ddp_model = DDP(model, device_ids=[rank])
     optimizer = torch.optim.Adamax(ddp_model.parameters(), final_learning_rate, weight_decay=weight_decay, eps=eps)
 
     total_training_steps = len(train_loader) * train_conf['epochs']
@@ -358,25 +356,6 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
     grad_scalar = GradScaler(2 ** 10)  # scale gradient for AMP
 
-    # load checkpoint if resume
-    if args.resume_from is not None:
-
-        if rank == 0:
-            print(f'[INFO] Loading checkpoint from: {args.resume_from}')
-
-        checkpoint = torch.load(args.resume_from, map_location=f'cuda:{rank}')
-
-        ddp_model.load_state_dict(checkpoint['state_dict'])
-
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        grad_scalar.load_state_dict(checkpoint['grad_scalar'])
-
-        global_step = checkpoint['global_step']
-        init_epoch = checkpoint['epoch']
-
-    else:
-        global_step, init_epoch = 0, 0
-
     for epoch in range(init_epoch, train_conf['epochs']):
 
         if rank == 0:
@@ -385,13 +364,13 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
         # Training
         ddp_model.train()
-        # global_step = epoch_train(train_loader, ddp_model.module, optimizer, scheduler, grad_scalar,
-        #                           train_conf["kl_anneal"], train_conf["spectral_regularization"],
-        #                           total_training_steps, global_step, rank, world_size, run)
+        global_step = epoch_train(train_loader, ddp_model.module, optimizer, scheduler, grad_scalar,
+                                  train_conf["kl_anneal"], train_conf["spectral_regularization"],
+                                  total_training_steps, global_step, rank, world_size, run)
 
         # Validation
         dist.barrier()
-        eval_freq = 1 if train_conf["epochs"] <= 50 else 20
+        eval_freq = 1 if train_conf["epochs"] <= 50 else 5
 
         if epoch % eval_freq == 0 or epoch == (train_conf["epochs"] - 1):
 
@@ -401,34 +380,41 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
             ddp_model.eval()
             with torch.no_grad():
 
-                epoch_validation(val_loader, ddp_model.module, global_step, rank, world_size, run)
-
                 if rank == 0:
 
                     num_samples = 8
 
                     # log reconstructions
                     x = next(iter(val_loader))[:num_samples].to(f"cuda:{rank}")
+                    b, c, h, w = x.shape
+
                     logits = ddp_model.module.autoencode(x)
-                    output_imgs = DiscMixLogistic(logits, num_bits=8).mean()
-                    output_imgs = make_grid(output_imgs).permute(1, 2, 0).cpu().numpy()
-                    run.log({f"validation/reconstructions": output_imgs}, step=global_step)
+                    x_rec = DiscMixLogistic(logits, num_bits=8).mean()
+
+                    display, _ = pack([x, x_rec], '* c h w')
+                    display = make_grid(display, nrow=b)
+                    display = wandb.Image(display)
+                    run.log({f"media/reconstructions": display}, step=global_step)
 
                     # log samples
                     for t in [0.7, 0.8, 0.9, 1.0]:
-                        logits = ddp_model.module.sample(num_samples, t)
-                        output_imgs = DiscMixLogistic(logits, num_bits=8).sample()
-                        output_imgs = make_grid(output_imgs).permute(1, 2, 0).cpu().numpy()
-                        run.log({f"validation/samples tau={t:.2f}": output_imgs}, step=global_step)
+                        logits = ddp_model.module.sample(num_samples, t, device='cuda:0')
+                        samples = DiscMixLogistic(logits, num_bits=8).sample()
+                        display = wandb.Image(make_grid(samples, nrow=num_samples))
+                        run.log({f"media/samples tau={t:.2f}": display}, step=global_step)
+
+                epoch_validation(val_loader, ddp_model.module, global_step, rank, world_size, run)
 
             # Save checkpoint (after validation)
             if rank == 0:
                 print(f'[INFO] Saving Checkpoint')
 
-                ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/epoch={epoch}.pt"
-                torch.save({'epoch': epoch, 'state_dict': model.state_dict(),
-                            'optimizer': optimizer.state_dict(), 'global_step': global_step,
-                            'grad_scalar': grad_scalar.state_dict()}, ckpt_file)
+                ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/epoch={epoch:02d}.pt"
+                torch.save({'epoch': epoch + 1, 'global_step': global_step,
+                            'state_dict': ddp_model.module.state_dict()},
+                           ckpt_file)
+
+            dist.barrier()
 
     if rank == 0:
         wandb.finish()
@@ -445,4 +431,9 @@ if __name__ == '__main__':
 
     arguments = parse_args()
 
-    mp.spawn(main, args=(w_size, arguments, get_model_conf(arguments.conf_file),), nprocs=w_size)
+    try:
+        mp.spawn(main, args=(w_size, arguments, get_model_conf(arguments.conf_file),), nprocs=w_size)
+    except KeyboardInterrupt as k:
+        wandb.finish()
+        dist.destroy_process_group()
+        raise k

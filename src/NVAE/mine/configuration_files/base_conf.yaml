@@ -10,7 +10,7 @@ autoencoder:
   min_groups_per_scale: 1 # the minimum number of groups per scale.
   num_cells_per_group: 2 # number of cell for each conditional in encoder
   num_latent_per_group: 32 # number of channels in group latent variables
-  num_nf_cells: 1 # guess that nf cells are useful especially in the first scales (high dependency between GLOBAL variables)
+  num_nf_cells: # guess that nf cells are useful especially in the first scales (high dependency between GLOBAL variables)
   initial_channels: 32 # number of initial channels in encoder
   num_pre-post_process_blocks: 1 # number of pre/post processing blocks (each one down/up scales image)
   num_pre-post_process_cells: 2 # number of cells per pre/post processing block
@@ -20,8 +20,8 @@ training:
   seed: 1234
   epochs: 200
   warmup_epochs: 5
-  cumulative_bs: 64
-  base_lr: 1e-2 # refers to LR for cumulative_bs = 512. Will scale automatically if bs is increased/reduced
+  cumulative_bs: 128
+  base_lr: 1e-3 # refers to LR for cumulative_bs = 512. Will scale automatically if bs is increased/reduced
   min_lr: 1e-4 # refers to LR for cumulative_bs = 512. Will scale automatically if bs is increased/reduced
   weight_decay: 3e-4
   eps: 1e-3

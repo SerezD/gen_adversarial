@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from einops import rearrange, repeat
 
-@torch.jit.script
+
 def soft_clamp(x: torch.Tensor, n: float = 5.):
     """
     check https://github.com/NVlabs/NVAE/issues/27
@@ -15,17 +15,6 @@ def soft_clamp(x: torch.Tensor, n: float = 5.):
     return x.div(n).tanh_().mul(n)
 
 
-@torch.jit.script
-def sample_normal_jit(mu, sigma):
-    """
-    Reparametrization trick. z = mu + eps * sigma
-    eps is sampled from normal (has the same shape as mu, sigma)
-    """
-    eps = mu.mul(0).normal_()
-    z = eps.mul_(sigma).add_(mu)
-    return z, eps
-
-
 class Normal:
     def __init__(self, mu, log_sigma, temp=1.):
         self.mu = soft_clamp(mu)
@@ -33,10 +22,13 @@ class Normal:
 
     def sample(self):
         """
-        sample new z using reparametrization trick (sample epsilon from normal distribution)
+        sample new z using reparametrization trick z = mu + eps * sigma
+            eps is sampled from normal (has the same shape as mu, sigma)
         return z, epsilon
         """
-        return sample_normal_jit(self.mu, self.sigma)
+        eps = torch.normal(mean=0., std=1, size=self.mu.shape, device=self.mu.device)
+        z = self.mu + eps * self.sigma
+        return z, eps
 
     def sample_given_eps(self, eps):
         return self.mu + eps * self.sigma

@@ -2,7 +2,6 @@ import numpy as np
 
 import torch
 from torch import nn
-from torch.nn.utils.parametrizations import weight_norm
 
 from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
 
@@ -20,8 +19,13 @@ class Conv2D(nn.Conv2d):
         self.log_weight_norm = None
 
         if weight_norm:
-            init = torch.sqrt(torch.sum(self.weight ** 2, dim=[1, 2, 3])).view(-1, 1, 1, 1)
-            self.log_weight_norm = nn.Parameter(torch.log(init + 1e-2), requires_grad=True)
+            self.log_weight_norm = nn.Parameter(
+                torch.log(1e-2 +
+                          torch.sqrt(
+                              torch.sum(self.weight ** 2, dim=[1, 2, 3], keepdim=True)
+                          )
+                ),
+                requires_grad=True)
 
         self.weight_normalized = self.normalize_weight()
 
@@ -33,15 +37,12 @@ class Conv2D(nn.Conv2d):
 
     def normalize_weight(self):
         """ applies weight normalization """
-        @torch.jit.script
-        def normalize_weight_jit(log_weight_norm, weight):
-            n = torch.exp(log_weight_norm)
-            wn = torch.sqrt(torch.sum(weight * weight, dim=[1, 2, 3]))  # norm(w)
-            weight = n * weight / (wn.view(-1, 1, 1, 1) + 1e-5)
-            return weight
 
         if self.log_weight_norm is not None:
-            weight = normalize_weight_jit(self.log_weight_norm, self.weight)
+            # weight = normalize_weight_jit(self.log_weight_norm, self.weight)
+            n = torch.exp(self.log_weight_norm)
+            wn = torch.sqrt(torch.sum(torch.pow(self.weight, 2), dim=[1, 2, 3], keepdim=True))  # norm(w)
+            weight = n * self.weight / (wn + 1e-5)
         else:
             weight = self.weight
 
@@ -291,21 +292,16 @@ class ARConv2d(nn.Conv2d):
 
         # init weight normalization parameters
         init = torch.log(
-            torch.sqrt(torch.sum((self.weight * self.mask)**2, dim=[1, 2, 3])
+            torch.sqrt(torch.sum((self.weight * self.mask) ** 2, dim=[1, 2, 3])
                        ).view(-1, 1, 1, 1) + 1e-2)
 
         self.log_weight_norm = nn.Parameter(init, requires_grad=True)
         self.weight_normalized = None
 
     def normalize_weight(self):
-        @torch.jit.script
-        def normalize_weight_jit(log_weight_norm, weight):
-            n = torch.exp(log_weight_norm)
-            wn = torch.sqrt(torch.sum(weight * weight, dim=[1, 2, 3]))  # norm(w)
-            weight = n * weight / (wn.view(-1, 1, 1, 1) + 1e-5)
-            return weight
-
-        return normalize_weight_jit(self.log_weight_norm, self.weight * self.mask.to(self.weight.device))
+        n = torch.exp(self.log_weight_norm)
+        wn = torch.sqrt(torch.sum(torch.pow(self.weight, 2), dim=[1, 2, 3], keepdim=True))  # norm(w)
+        return n * self.weight / (wn + 1e-5)
 
     def forward(self, x):
         """
@@ -342,7 +338,6 @@ class ELUConv(nn.Module):
 
 class ARInvertedResidual(nn.Module):
     def __init__(self, in_z: int, dilation: int = 1, kernel_size: int = 5, mirror=False):
-
         super().__init__()
 
         self.hidden_dim = int(round(in_z * 6))
@@ -352,7 +347,7 @@ class ARInvertedResidual(nn.Module):
                        nn.ELU(inplace=True)])
         layers.extend([ARConv2d(self.hidden_dim, self.hidden_dim, groups=self.hidden_dim, kernel_size=kernel_size,
                                 padding=padding, dilation=dilation, mirror=mirror, zero_diag=False),
-                      nn.ELU(inplace=True)])
+                       nn.ELU(inplace=True)])
         self.conv_z = nn.Sequential(*layers)
 
     def forward(self, z):
@@ -361,7 +356,6 @@ class ARInvertedResidual(nn.Module):
 
 class NFCell(nn.Module):
     def __init__(self, num_z: int, mirror: bool):
-
         super().__init__()
 
         # couple of convolution with mask applied on kernel
@@ -372,7 +366,6 @@ class NFCell(nn.Module):
                           weight_init_coeff=0.1, mirror=mirror)
 
     def forward(self, z):
-
         s = self.conv(z)
 
         mu = self.mu(s)
@@ -383,7 +376,6 @@ class NFCell(nn.Module):
 
 class NFBlock(nn.Module):
     def __init__(self, num_z: int):
-
         super().__init__()
 
         self.cell1 = NFCell(num_z, mirror=False)
