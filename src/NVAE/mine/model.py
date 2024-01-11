@@ -1,6 +1,6 @@
 from collections import OrderedDict
 
-from einops import rearrange
+from einops import rearrange, pack
 
 import torch
 from torch import nn
@@ -388,6 +388,7 @@ class AutoEncoder(nn.Module):
         """
 
         b = gt_images.shape[0]
+        kl_losses = torch.empty((b, 0), device=gt_images.device)
 
         # preprocessing phase
         normalized_images = (gt_images * 2) - 1.0  # in range -1 1
@@ -421,23 +422,22 @@ class AutoEncoder(nn.Module):
 
         # encoder q(z_0|x)
         mu_q, log_sig_q = torch.chunk(self.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
-        dist = Normal(mu_q, log_sig_q)
-        z_0, _ = dist.sample()  # uses reparametrization trick
-        log_q = dist.log_p(z_0)
+        dist_enc = Normal(mu_q, log_sig_q)
+        z_0, _ = dist_enc.sample()  # uses reparametrization trick
 
-        all_q = [dist]
-        all_log_q = [log_q]
+        # prior p(z_0) is a standard Gaussian (log_sigma 0 --> sigma = 1.)
+        dist_dec = Normal(torch.zeros_like(mu_q), torch.zeros_like(log_sig_q))
 
         # apply normalizing flows
         if self.use_nf:
+            log_enc = dist_enc.log_p(z_0)
             z_0 = self.nf_cells.get_submodule('nf_0:0')(z_0)
+            log_dec = dist_dec.log_p(z_0)
+            kl_0 = log_enc - log_dec  # with NF can't use closed form for kl
+        else:
+            kl_0 = dist_enc.kl(dist_dec)  # kl(q, p)
 
-        # prior p(z_0) is a standard Gaussian (log_sigma 0 --> sigma = 1.)
-        dist = Normal(mu=torch.zeros_like(z_0), log_sigma=torch.zeros_like(z_0))
-        log_p = dist.log_p(z_0)
-
-        all_p = [dist]
-        all_log_p = [log_p]
+        kl_losses, _ = pack([kl_losses, torch.sum(kl_0, dim=[1, 2, 3]).unsqueeze(1)], 'b *')
 
         # decoding phase
 
@@ -473,22 +473,22 @@ class AutoEncoder(nn.Module):
                         2, dim=1)
 
                     # sample z_i as combination of encoder and decoder params
-                    dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
-                    z_i, _ = dist.sample()
-                    log_q = dist.log_p(z_i)
+                    dist_enc = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
+                    z_i, _ = dist_enc.sample()
 
-                    all_q.append(dist)
-                    all_log_q.append(log_q)
+                    # log_p(z_i|z_j<i)
+                    dist_dec = Normal(mu_p, log_sig_p)
 
                     # apply NF
                     if self.use_nf:
+                        log_enc = dist_enc.log_p(z_i)
                         z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
+                        log_dec = dist_dec.log_p(z_i)
+                        kl_i = log_enc - log_dec
+                    else:
+                        kl_i = dist_enc.kl(dist_dec)
 
-                    # evaluate log_p(z)
-                    dist = Normal(mu_p, log_sig_p)
-                    all_p.append(dist)
-                    log_p = dist.log_p(z_i)
-                    all_log_p.append(log_p)
+                    kl_losses, _ = pack([kl_losses, torch.sum(kl_i, dim=[1, 2, 3]).unsqueeze(1)], 'b *')
 
                     # combine x and z_i
                     x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
@@ -504,23 +504,7 @@ class AutoEncoder(nn.Module):
         logits = self.to_logits(x)
         logits = rearrange(logits, 'b (n c) h w -> b n c h w', n=self.num_mixtures * 3, c=self.img_channels)
 
-        # compute kl terms TODO (verify what is used and what is not)
-        kl_all = []
-        kl_diag = []
-        log_p_sum, log_q_sum = 0., 0.
-        for q, p, log_q, log_p in zip(all_q, all_p, all_log_q, all_log_p):
-
-            if self.use_nf:
-                kl_per_var = log_q - log_p
-            else:
-                kl_per_var = q.kl(p)
-
-            kl_diag.append(torch.mean(torch.sum(kl_per_var, dim=[2, 3]), dim=0))
-            kl_all.append(torch.sum(kl_per_var, dim=[1, 2, 3]))
-            log_p_sum += torch.sum(log_p, dim=[1, 2, 3])
-            log_q_sum += torch.sum(log_q, dim=[1, 2, 3])
-
-        return logits, log_q_sum, log_p_sum, kl_all, kl_diag
+        return logits, kl_losses
 
     def sample(self, num_samples: int, temperature: float, device: str = 'cpu'):
 

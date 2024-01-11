@@ -158,7 +158,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
         with autocast():
 
             # forward pass
-            logits, _, _, kl_all, _ = model(x)
+            logits, kl_all = model(x)
             reconstructions = DiscMixLogistic(logits).log_prob(x)
 
             # reconstruction loss
@@ -249,7 +249,7 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         # b, c, h, w = x.shape
         # device = x.device
 
-        logits, _, _, kl_all, _ = model(x)
+        logits, kl_all = model(x)
         reconstructions = DiscMixLogistic(logits).log_prob(x)
 
         # reconstruction loss

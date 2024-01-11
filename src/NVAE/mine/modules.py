@@ -6,6 +6,18 @@ from torch import nn
 from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 
+def normalize_weight(log_weight_norm: nn.Parameter, weight: nn.Parameter) -> nn.Parameter:
+    """ applies weight normalization """
+
+    if log_weight_norm is not None:
+
+        n = torch.exp(log_weight_norm)
+        wn = torch.sqrt(torch.sum(torch.pow(weight, 2), dim=[1, 2, 3], keepdim=True))  # norm(w)
+        return n * weight / (wn + 1e-5)
+    else:
+        return weight
+
+
 class Conv2D(nn.Conv2d):
     """
     Custom implementation with weight normalization.
@@ -13,40 +25,110 @@ class Conv2D(nn.Conv2d):
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1,
                  padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = False, weight_norm: bool = True):
+        """
+        removed param "data_init" from original implementation, since was always set to False
+        """
 
         super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
 
         self.log_weight_norm = None
 
         if weight_norm:
+            # initialize log weight norm parameter
             self.log_weight_norm = nn.Parameter(
                 torch.log(1e-2 +
                           torch.sqrt(
-                              torch.sum(self.weight ** 2, dim=[1, 2, 3], keepdim=True)
+                              torch.sum(
+                                  torch.pow(self.weight, 2),
+                                  dim=[1, 2, 3], keepdim=True)
                           )
-                ),
+                          ),
                 requires_grad=True)
 
-        self.weight_normalized = self.normalize_weight()
+        self.weight_normalized = normalize_weight(self.log_weight_norm, self.weight)
 
-    def forward(self, x):
-
-        self.weight_normalized = self.normalize_weight()
+    def forward(self, x: torch.Tensor):
+        self.weight_normalized = normalize_weight(self.log_weight_norm, self.weight)
         return nn.functional.conv2d(x, self.weight_normalized, self.bias, self.stride,
                                     self.padding, self.dilation, self.groups)
 
-    def normalize_weight(self):
-        """ applies weight normalization """
 
-        if self.log_weight_norm is not None:
-            # weight = normalize_weight_jit(self.log_weight_norm, self.weight)
-            n = torch.exp(self.log_weight_norm)
-            wn = torch.sqrt(torch.sum(torch.pow(self.weight, 2), dim=[1, 2, 3], keepdim=True))  # norm(w)
-            weight = n * self.weight / (wn + 1e-5)
-        else:
-            weight = self.weight
+class ARConv2d(nn.Conv2d):
 
-        return weight
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1,
+                 padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = False,
+                 zero_diag: bool = False, mirror: bool = False):
+        """
+        Conv 2D with applied mask on each kernel
+        """
+
+        def channel_mask():
+
+            assert in_channels % out_channels == 0 or out_channels % in_channels == 0
+            assert groups == 1 or groups == in_channels
+
+            mask = None
+
+            if groups == 1:
+                mask = torch.ones([out_channels, in_channels], dtype=torch.float32)
+                if out_channels >= in_channels:
+                    ratio = out_channels // in_channels
+                    for i in range(in_channels):
+                        mask[i * ratio:(i + 1) * ratio, i + 1:] = 0
+                        if zero_diag:
+                            mask[i * ratio:(i + 1) * ratio, i:i + 1] = 0
+                else:
+                    ratio = in_channels // out_channels
+                    for i in range(out_channels):
+                        mask[i:i + 1, (i + 1) * ratio:] = 0
+                        if zero_diag:
+                            mask[i:i + 1, i * ratio:(i + 1) * ratio:] = 0
+
+            elif groups == in_channels:
+                mask = torch.ones([out_channels, in_channels // groups], dtype=torch.float32)
+                if zero_diag:
+                    mask = 0. * mask
+
+            return mask
+
+        def create_conv_mask():
+            """
+            create the boolean mask for kernel
+            """
+
+            m = (kernel_size - 1) // 2
+            mask = torch.ones([out_channels, in_channels // groups, kernel_size, kernel_size], dtype=torch.float32)
+            mask[:, :, m:, :] = 0
+            mask[:, :, m, :m] = 1
+            mask[:, :, m, m] = channel_mask()
+            if mirror:
+                mask = torch.flip(mask, dims=[2, 3])  # TODO original made a copy, why ?
+            return mask
+
+        super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
+
+        assert kernel_size % 2 == 1, 'kernel size should be an odd value.'
+        self.mask = create_conv_mask()
+
+        # init weight normalization parameters
+        self.log_weight_norm = nn.Parameter(
+            torch.log(1e-2 +
+                      torch.sqrt(
+                          torch.sum(
+                              torch.pow(self.weight * self.mask, 2),
+                              dim=[1, 2, 3], keepdim=True
+                          )
+                      )
+                      ),
+            requires_grad=True)
+
+        self.weight_normalized = normalize_weight(self.log_weight_norm, self.weight)
+
+    def forward(self, x):
+
+        self.weight_normalized = normalize_weight(self.log_weight_norm, self.weight)
+        return nn.functional.conv2d(x, self.weight_normalized, self.bias, self.stride, self.padding,
+                                    self.dilation, self.groups)
 
 
 class SE(nn.Module):
@@ -65,12 +147,13 @@ class SE(nn.Module):
         self.linear_2 = nn.Linear(hidden_channels, out_channels)
 
     def forward(self, x):
+        b, c, h, w = x.shape
+
         # gate
         se = torch.mean(x, dim=[2, 3])
-        se = se.view(se.size(0), -1)
         se = nn.functional.relu(self.linear_1(se))
         se = nn.functional.sigmoid(self.linear_2(se))
-        se = se.view(se.size(0), -1, 1, 1)
+        se = se.view(b, c, 1, 1)
 
         return x * se
 
@@ -80,25 +163,31 @@ class SkipDown(nn.Module):
         """
         residual skip connection in case of downscaling.
         :param in_channels:
-        :param out_channels:
-        :param stride:
+        :param out_channels: must be divisible by 4
+        :param stride: if 2, downsampling is performed.
         """
+
+        assert out_channels % 4 == 0, f"out_channels must be divisible by 4, but you passed: {out_channels}"
 
         super().__init__()
 
-        self.conv_1 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, weight_norm=True)
-        self.conv_2 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, weight_norm=True)
-        self.conv_3 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, weight_norm=True)
-        self.conv_4 = Conv2D(in_channels, out_channels - 3 * (out_channels // 4), kernel_size=1,
-                             stride=stride, weight_norm=True)
+        # each conv reduces to 1/4 of the channels
+        # TODO try to replace this with a normal convolution and see what happens...
+        self.conv_1 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        self.conv_2 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        self.conv_3 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        self.conv_4 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
 
     def forward(self, x):
         out = torch.nn.functional.silu(x)
+
         conv1 = self.conv_1(out)
         conv2 = self.conv_2(out[:, :, 1:, 1:])
         conv3 = self.conv_3(out[:, :, :, 1:])
         conv4 = self.conv_4(out[:, :, 1:, :])
+
         out = torch.cat([conv1, conv2, conv3, conv4], dim=1)
+
         return out
 
 
@@ -138,9 +227,9 @@ class ResidualCellEncoder(nn.Module):
         # downsampling in the first conv, depending on stride
         self.residual = nn.Sequential(
             SyncBatchNormSwish(in_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
-            Conv2D(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, weight_norm=True),
+            Conv2D(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=True, weight_norm=True),
             SyncBatchNormSwish(out_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
-            Conv2D(out_channels, out_channels, kernel_size=3, stride=1, padding=1, weight_norm=True)
+            Conv2D(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True, weight_norm=True)
         )
 
         if use_SE:
@@ -205,7 +294,7 @@ class EncCombinerCell(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
 
-        self.conv = Conv2D(in_channels, out_channels, kernel_size=1, weight_norm=True)
+        self.conv = Conv2D(in_channels, out_channels, kernel_size=1, bias=True, weight_norm=True)
 
     def forward(self, x_enc, x_dec):
         """
@@ -225,93 +314,12 @@ class DecCombinerCell(nn.Module):
 
         super().__init__()
 
-        self.conv = Conv2D(feature_channels + z_channels, out_channels, kernel_size=1, weight_norm=True)
+        self.conv = Conv2D(feature_channels + z_channels, out_channels, kernel_size=1, bias=True, weight_norm=True)
 
     def forward(self, x, z):
         out = torch.cat([x, z], dim=1)
         out = self.conv(out)
         return out
-
-
-class ARConv2d(nn.Conv2d):
-
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1,
-                 padding: int = 0, dilation: int = 1, groups: int = 1, bias: bool = False,
-                 zero_diag: bool = False, mirror: bool = False):
-        """
-        Conv 2D with applied mask on each kernel
-        """
-
-        def channel_mask():
-
-            assert in_channels % out_channels == 0 or out_channels % in_channels == 0
-            assert groups == 1 or groups == in_channels
-
-            mask = None
-
-            if groups == 1:
-                mask = torch.ones([out_channels, in_channels], dtype=torch.float32)
-                if out_channels >= in_channels:
-                    ratio = out_channels // in_channels
-                    for i in range(in_channels):
-                        mask[i * ratio:(i + 1) * ratio, i + 1:] = 0
-                        if zero_diag:
-                            mask[i * ratio:(i + 1) * ratio, i:i + 1] = 0
-                else:
-                    ratio = in_channels // out_channels
-                    for i in range(out_channels):
-                        mask[i:i + 1, (i + 1) * ratio:] = 0
-                        if zero_diag:
-                            mask[i:i + 1, i * ratio:(i + 1) * ratio:] = 0
-
-            elif groups == in_channels:
-                mask = torch.ones([out_channels, in_channels // groups], dtype=torch.float32)
-                if zero_diag:
-                    mask = 0. * mask
-
-            return mask
-
-        def create_conv_mask():
-            """
-            create the boolean mask for kernel
-            """
-
-            m = (kernel_size - 1) // 2
-            mask = torch.ones([out_channels, in_channels // groups, kernel_size, kernel_size], dtype=torch.float32)
-            mask[:, :, m:, :] = 0
-            mask[:, :, m, :m] = 1
-            mask[:, :, m, m] = channel_mask()
-            if mirror:
-                mask = torch.flip(mask, dims=[2, 3])  # TODO original made a copy, why ?
-            return mask
-
-        super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
-
-        assert kernel_size % 2 == 1, 'kernel size should be an odd value.'
-        self.mask = create_conv_mask()
-
-        # init weight normalization parameters
-        init = torch.log(
-            torch.sqrt(torch.sum((self.weight * self.mask) ** 2, dim=[1, 2, 3])
-                       ).view(-1, 1, 1, 1) + 1e-2)
-
-        self.log_weight_norm = nn.Parameter(init, requires_grad=True)
-        self.weight_normalized = None
-
-    def normalize_weight(self):
-        n = torch.exp(self.log_weight_norm)
-        wn = torch.sqrt(torch.sum(torch.pow(self.weight, 2), dim=[1, 2, 3], keepdim=True))  # norm(w)
-        return n * self.weight / (wn + 1e-5)
-
-    def forward(self, x):
-        """
-        Args:
-            x (torch.Tensor): of size (B, C_in, H, W).
-        """
-
-        self.weight_normalized = self.normalize_weight()
-        return nn.functional.conv2d(x, self.weight_normalized, self.bias, self.stride, self.padding,
-                                    self.dilation, self.groups)
 
 
 class ELUConv(nn.Module):
