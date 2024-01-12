@@ -175,7 +175,7 @@ class DiscMixLogistic:
         x = selected_mu + torch.exp(selected_scale) * base_sample
 
         # move to 0-1 range
-        x = (x + 1) / 2
+        x = torch.clip((x + 1) / 2, 0., 1.)
 
         return rearrange(x, 'b (c h w) -> b c h w', c=self.img_channels, h=self.h, w=self.w)
 
@@ -186,7 +186,7 @@ class DiscMixLogistic:
         res = self.means_logits * probs
         res = torch.sum(res, dim=1)
 
-        # normalize 0__1 range
-        res = (res + 1) / 2
+        # move 0__1 range
+        res = torch.clip((res + 1) / 2, 0., 1.)
 
         return rearrange(res, 'b (c h w) -> b c h w', c=self.img_channels, h=self.h, w=self.w)
