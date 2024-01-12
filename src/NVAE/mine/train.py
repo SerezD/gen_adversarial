@@ -158,27 +158,31 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
         with autocast():
 
             # forward pass
-            logits, kl_all = model(x)
+            logits, kl_terms = model(x)
             reconstructions = DiscMixLogistic(logits).log_prob(x)
 
             # reconstruction loss
             rec_loss = - torch.sum(reconstructions, dim=1)
 
-            # compute kl weight (Appendix A of NVAE paper, linear warmup KL Term β)
-            kl_weight = (global_step - float(kl_params["kl_const_portion"]) * total_training_steps)
-            kl_weight /= (float(kl_params["kl_anneal_portion"]) * total_training_steps)
-            kl_weight = max(min(1.0, kl_weight), float(kl_params["kl_const_coeff"]))
+            # compute kl weight (Appendix A of NVAE paper, linear warmup of KL Term β for kl_anneal_portion of steps)
+            beta = (global_step - float(kl_params["kl_const_portion"]) * total_training_steps)
+            beta /= (float(kl_params["kl_anneal_portion"]) * total_training_steps)
+            beta = max(min(1.0, beta), float(kl_params["kl_const_coeff"]))
 
             # balance kl (Appendix A of NVAE paper, γ term on each scale)
-            final_kl, kl_coefficients, _ = kl_balancer(kl_all, kl_weight, kl_balance=True, alpha=model.kl_alpha)
+            final_kl, kl_gammas, kl_terms = kl_balancer(kl_terms, beta, balance=True, alpha=model.kl_alpha)
 
             # compute final loss
             loss = torch.mean(rec_loss + final_kl)
 
             # get spectral regularization coefficient λ
+            # from Appendix A (annealing λ):
+            # The coefficient of smoothness λ is set to a fixed value {10e-2, 10e-1} for almost all experiments, using
+            # 10e-1 only when 10e-2 was unstable.
+            # Exception is from CelebA and FFHQ where they anneal it for the same number of iterations as β
             if sr_params["weight_decay_norm_anneal"]:
-                lambda_coeff = kl_weight * np.log(float(sr_params["weight_decay_norm"]))
-                lambda_coeff += (1. - kl_weight) * np.log(float(sr_params["weight_decay_norm_init"]))
+                lambda_coeff = beta * np.log(float(sr_params["weight_decay_norm"]))
+                lambda_coeff += (1. - beta) * np.log(float(sr_params["weight_decay_norm_init"]))
                 lambda_coeff = np.exp(lambda_coeff)
             else:
                 lambda_coeff = float(sr_params["weight_decay_norm"])
@@ -195,9 +199,10 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
         # to log at each step
         if rank == 0:
 
-            log_dict = {'lr': lr, 'KL beta': kl_weight, 'Lambda': lambda_coeff}
-            for i, v in enumerate(kl_coefficients.detach().cpu().numpy()):
-                log_dict[f'KL gamma {i}'] = v
+            log_dict = {'lr': lr, 'KL beta': beta, 'Lambda': lambda_coeff}
+            for i, (k, v) in enumerate(zip(kl_gammas.detach().cpu().numpy(), kl_terms.detach().cpu().numpy())):
+                log_dict[f'KL gamma {i}'] = k
+                log_dict[f'KL term {i}'] = v
 
             run.log(log_dict, step=global_step)
 
@@ -255,7 +260,7 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         # reconstruction loss
         rec_loss = - torch.sum(reconstructions, dim=1)
 
-        final_kl, _, _ = kl_balancer(kl_all, kl_balance=False)
+        final_kl, _, _ = kl_balancer(kl_all, balance=False)
         loss = rec_loss + final_kl
 
         # save all loss terms to rank 0

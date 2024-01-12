@@ -34,16 +34,22 @@ class Normal:
         return self.mu + eps * self.sigma
 
     def log_p(self, samples):
-        """ log probability of observing each feature of z (independently). """
+        """ compute the log likelihood of normal probability on samples. """
         normalized_samples = (samples - self.mu) / self.sigma
-        log_p = - 0.5 * normalized_samples * normalized_samples - 0.5 * np.log(2 * np.pi) - torch.log(self.sigma)
+        log_p = - 0.5 * torch.square(normalized_samples) - 0.5 * np.log(2 * np.pi) - torch.log(self.sigma)
         return log_p
 
-    def kl(self, normal_dist):
-        term1 = (self.mu - normal_dist.mu) / normal_dist.sigma
-        term2 = self.sigma / normal_dist.sigma
+    def kl(self, normal_dist, eps: float = 1e-10):
+        """
+        check section 3.2 of the paper, paragraph: Residual Normal Distributions
+        Here self.mu, self.sigma are the parameters of the posterior distribution
+        normal_dist.mu, normal_dist.sigma are the parameters of the prior distribution
+        """
 
-        return 0.5 * (term1 * term1 + term2 * term2) - 0.5 - torch.log(term2)
+        delta_mu_sq = torch.square(self.mu - normal_dist.mu)
+        delta_sigma_sq = torch.square(self.sigma - normal_dist.sigma) + eps  # added to prevent log(0)
+        kl = 0.5 * (delta_mu_sq / torch.square(self.sigma) + delta_sigma_sq - torch.log(delta_sigma_sq) - 1.)
+        return kl
 
 
 # pytorch example for Logistic Distribution --> https://pytorch.org/docs/stable/distributions.html

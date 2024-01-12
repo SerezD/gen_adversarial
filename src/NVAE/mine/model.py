@@ -57,7 +57,7 @@ class AutoEncoder(nn.Module):
                     torch.ones(self.groups_per_scale[self.num_scales - i - 1])
                     for i in range(self.num_scales)]
         kl_alpha = torch.cat(kl_alpha, dim=0)
-        self.kl_alpha = kl_alpha / torch.min(kl_alpha)  # normalize to min 1
+        self.kl_alpha = (kl_alpha / torch.min(kl_alpha)).unsqueeze(0)  # normalize to min 1
 
         # ######################################################################################
         # initial learned constant
