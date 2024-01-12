@@ -39,15 +39,42 @@ class Normal:
         log_p = - 0.5 * torch.square(normalized_samples) - 0.5 * np.log(2 * np.pi) - torch.log(self.sigma)
         return log_p
 
-    def kl(self, normal_dist, eps: float = 1e-10):
+    def kl(self, prior):
         """
         check section 3.2 of the paper, paragraph: Residual Normal Distributions
         Here self.mu, self.sigma are the parameters of the posterior distribution
-        normal_dist.mu, normal_dist.sigma are the parameters of the prior distribution
+        prior.mu, prior.sigma are the parameters of the prior distribution
+
+        p(z_i|z_{l<i}) is the prior, defined as N(μ_p, σ_p) where both params are conditioned on all z_{l<i}
+
+        q(z_i|z_{l<i}, x) is the distribution from the encoder (self), defined as:
+            q = N(μ_p + Δμ_q, σ_p * Δσ_q), where Δμ_q, Δσ_q are the relative shift and scale given by the hierarchical
+            nature of the distribution.
+
+        So basically, the self.mu and self.sigma are the parameters of the posterior:
+            self.mu = μ_p + Δμ_q
+            self.sigma = σ_p * Δσ_q
+
+        The KL Loss between two normal distributions a = N(μ_1, σ_1), b = N(μ_2, σ_2) is given by:
+            0.5 [ (μ_2 - μ_1)**2 / σ_2**2 ] + 0.5 (σ_1**2 / σ_2**2) - 0.5 [ln(σ_1**2 / σ_2**2)] - 0.5
+
+        proof: https://statproofbook.github.io/P/norm-kl.html
+
+        In our case: μ_1 = self.mu; μ_2 = prior.mu; σ_1 = self.sigma; σ_2 = prior.sigma
+
+        So the three terms in the formula above become:
+            1. 0.5 [ (μ_p - μ_p + Δμ_q)**2 / σ_p**2] =  0.5 [ Δμ_q**2 / σ_p**2]
+            2. 0.5 ((σ_p * Δσ_q)**2 / σ_p**2) = 0.5 [Δσ_q**2]
+            3. 0.5 [ln((σ_p * Δσ_q)**2 / σ_p**2)] = 0.5 ln(Δσ_q**2)
+
+        The final formula is thus the one written in Equation 2 and:
+        Δμ_q = self.mu - prior.mu
+        Δσ_q = self.sigma / prior.sigma
+
         """
 
-        delta_mu_sq = torch.square(self.mu - normal_dist.mu)
-        delta_sigma_sq = torch.square(self.sigma - normal_dist.sigma) + eps  # added to prevent log(0)
+        delta_mu_sq = torch.square(self.mu - prior.mu)
+        delta_sigma_sq = torch.square(self.sigma / prior.sigma)
         kl = 0.5 * (delta_mu_sq / torch.square(self.sigma) + delta_sigma_sq - torch.log(delta_sigma_sq) - 1.)
         return kl
 
