@@ -539,7 +539,7 @@ class AutoEncoder(nn.Module):
                     mu_p, log_sig_p = torch.chunk(self.dec_sampler.get_submodule(f'sampler_{s}:{g}')(x), 2, dim=1)
 
                     # sample z_i
-                    dist = Normal(mu_p, log_sig_p)
+                    dist = Normal(mu_p, log_sig_p, temp=temperature)
                     z_i, _ = dist.sample()
 
                     # combine x and z_i

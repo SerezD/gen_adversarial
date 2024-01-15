@@ -542,6 +542,7 @@ class AutoEncoder(nn.Module):
 
         chunks = []
         normalized_chunks = []
+        mu_chunks = []
 
         s = self.stem(2 * x - 1.0)
 
@@ -582,6 +583,7 @@ class AutoEncoder(nn.Module):
         # SAVE CHUNK 0
         chunks.append(z.view(z.shape[0], -1))
         normalized_chunks.append(((z - mu_q)/ (torch.exp(log_sig_q) + 1e-2)).view(z.shape[0], -1))
+        mu_chunks.append(mu_q)
         z = z_n
         # ##################################################################
 
@@ -617,6 +619,7 @@ class AutoEncoder(nn.Module):
                     # SAVE CHUNK i
                     chunks.append(z.view(z.shape[0], -1))
                     normalized_chunks.append(((z - (mu_p + mu_q)) / (torch.exp(log_sig_p + log_sig_q) + 1e-2)).view(z.shape[0], -1))
+                    mu_chunks.append(mu_p + mu_q)
                     z = z_n
 
                 # 'combiner_dec'
@@ -625,7 +628,90 @@ class AutoEncoder(nn.Module):
             else:
                 s = cell(s)
 
-        return chunks, normalized_chunks
+        return chunks, normalized_chunks, mu_chunks
+
+    def encode_deterministic(self, x):
+        """
+        returns predicted mu for each chunk in list
+        """
+        chunks = []
+
+        s = self.stem(2 * x - 1.0)
+
+        # perform pre-processing
+        for cell in self.pre_process:
+            s = cell(s)
+
+        # run the main encoder tower
+        # here combiner cells refer to the + part (combine with decoder for z)
+        combiner_cells_enc = []
+        combiner_cells_s = []
+        for cell in self.enc_tower:
+            if cell.cell_type == 'combiner_enc':
+                combiner_cells_enc.append(cell)
+                combiner_cells_s.append(s)
+            else:
+                s = cell(s)
+
+        # reverse combiner cells and their input for decoder
+        combiner_cells_enc.reverse()
+        combiner_cells_s.reverse()
+
+        # SAMPLE z_0 from q(x)
+        idx_dec = 0
+        ftr = self.enc0(s)  # this reduces the channel dimension
+        param0 = self.enc_sampler[idx_dec](ftr)
+
+        mu_q, log_sig_q = torch.chunk(param0, 2, dim=1)
+        mu_q = Normal(mu_q, log_sig_q).mu  # mu with soft_clamp !
+
+        # apply normalizing flows
+        nf_offset = 0
+        for n in range(self.num_flows):
+            mu_q, _ = self.nf_cells[n](mu_q, ftr)
+        nf_offset += self.num_flows
+
+        # SAVE CHUNK 0
+        chunks.append(mu_q.view(mu_q.shape[0], -1))
+        # ##################################################################
+
+        # To make sure we do not pass any deterministic features from x to decoder.
+        s = 0
+
+        idx_dec = 0
+        s = self.prior_ftr0.unsqueeze(0)
+        batch_size = mu_q.size(0)
+        s = s.expand(batch_size, -1, -1, -1)
+        for cell in self.dec_tower:
+            if cell.cell_type == 'combiner_dec':
+
+                if idx_dec > 0:
+
+                    # SAMPLE prior from Z
+                    # param = self.dec_sampler[idx_dec - 1](s)
+                    # mu_p, log_sig_p = torch.chunk(param, 2, dim=1)
+
+                    # SAMPLE prior from X
+                    ftr = combiner_cells_enc[idx_dec - 1](combiner_cells_s[idx_dec - 1], s)
+                    param = self.enc_sampler[idx_dec](ftr)
+                    mu_q, log_sig_q = torch.chunk(param, 2, dim=1)
+                    mu_q = Normal(mu_q, log_sig_q).mu  # mu with soft_clamp !
+
+                    # apply NF
+                    for n in range(self.num_flows):
+                        mu_q, _ = self.nf_cells[nf_offset + n](mu_q, ftr)
+                    nf_offset += self.num_flows
+
+                    # SAVE CHUNK i
+                    chunks.append(mu_q.view(mu_q.shape[0], -1))
+
+                # 'combiner_dec'
+                s = cell(s, mu_q)
+                idx_dec += 1
+            else:
+                s = cell(s)
+
+        return chunks
 
     def decode(self, chunks: list):
 
