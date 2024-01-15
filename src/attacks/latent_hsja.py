@@ -1,5 +1,3 @@
-# https://github.com/Jianbo-Lab/HSJA/blob/master/hsja.py
-
 import os
 import math
 import numpy as np
@@ -11,6 +9,37 @@ from torch.utils.data import DataLoader
 from data.datasets import CoupledDataset
 
 from matplotlib import pyplot as plt
+
+from src.NVAE.original.model import AutoEncoder
+from src.NVAE.original.utils import get_arch_cells
+
+
+# hsja but:
+# binary search interpolation in the latent space. (low level)
+# gradient estimation in the latent space (u_b) are latent vectors. (high level)
+
+
+class NVAEModel(torch.nn.Module):
+
+    def __init__(self, base_model: torch.nn.Module, device: str = 'cuda:0'):
+
+        super().__init__()
+
+        self.device = device
+        self.base_model = base_model.to(self.device).eval()
+
+    def encode(self, images: torch.Tensor):
+        """
+        :return list of chunks
+        """
+        return self.base_model.encode_deterministic(images.to(self.device))
+
+    def decode(self, chunks: list):
+        """
+        reconstructed images (b, c, h, w) from chunks
+        """
+        logits = self.base_model.decode(chunks)
+        return self.base_model.decoder_output(logits).mean()
 
 
 class AttackedModel(torch.nn.Module):
@@ -91,7 +120,7 @@ def compute_distance(x1: torch.Tensor, x2: torch.Tensor, constraint='l2'):
     return torch.cdist(x1, x2, p=2 if constraint == 'l2' else float('inf')).diag()
 
 
-def approximate_gradient(model: AttackedModel, sample: torch.Tensor, num_evals: int, delta: float, params: dict):
+def approximate_gradient(model: AttackedModel, nvae, sample: torch.Tensor, num_evals: int, delta: float, params: dict):
     """
     :param model: attacked CNN for query
     :param sample: src_image (1, c, h, w)
@@ -105,27 +134,39 @@ def approximate_gradient(model: AttackedModel, sample: torch.Tensor, num_evals: 
     #   1/B \sum_b=1^B sign(predict(x + \delta * u_b)) * u_b
 
     clip_max, clip_min = params['clip_max'], params['clip_min']
-    _, c, h, w = sample.shape
+    _, C, H, W = sample.shape
     device = sample.device
 
     # 1. Generate random vectors (u_b for num_evals times, where num_evals is B in the formula).
     #    use gaussian noise for l2 and uniform noise for linf
     if params['constraint'] == 'l2':
-        u_noise = torch.normal(mean=torch.zeros((num_evals, c, h, w)), std=torch.ones((num_evals, c, h, w))).to(device)
+        chunks = nvae.encode(sample)
+        u_noise = []
+        for ck in chunks:
+            _, d = ck.shape
+            u_noise.append(
+                torch.normal(mean=torch.zeros((num_evals, d)), std=torch.ones((num_evals, d))).to(device)
+            )
     elif params['constraint'] == 'linf':
-        u_noise = torch.rand(size=(num_evals, c, h, w), device=device) * 2. - 1.  # in range -1, 1
+        u_noise = torch.rand(size=(num_evals, C, H, W), device=device) * 2. - 1.  # in range -1, 1
     else:
         raise NotImplementedError(f"constraint: {params['constraint']}")
 
     # Each noise vector is also normalized
-    denominator = torch.sqrt(torch.sum(torch.pow(u_noise, 2), dim=(1, 2, 3), keepdim=True))
-    u_noise = torch.div(u_noise, denominator)
+    for i, u in enumerate(u_noise.copy()):
+        denominator = torch.sqrt(torch.sum(torch.pow(u, 2), dim=1, keepdim=True))
+        u_noise[i] = torch.div(u, denominator)
 
     # 2. obtain all perturbed samples to test
-    perturbed_samples = torch.clip(sample + delta * u_noise, clip_min, clip_max)
+    sample_chunks = nvae.encode(sample)
+    perturbed_chunks = []
+    for i, u in enumerate(u_noise):
+        perturbed_chunks.append(sample_chunks[i] + 0.01 * u)
+
+    perturbed_samples = torch.clip(nvae.decode(perturbed_chunks.copy()), clip_min, clip_max)
 
     # clip also each u_b
-    u_noise = (perturbed_samples - sample) / delta
+    u_noise = (perturbed_samples - sample) # / delta
 
     # 3. query the model and obtain sign(predict(x + \delta * u_b)) = -1 or 1.
     decisions = decision_function(model, perturbed_samples, params).view(-1, 1, 1, 1).to(torch.float32)
@@ -139,13 +180,13 @@ def approximate_gradient(model: AttackedModel, sample: torch.Tensor, num_evals: 
         # corner cases (don't need to normalize)
         # all 1.0 values => label always changes for any noise.
         # all -1.0 values => label never changes for any noise.
-        gradf = signs * torch.mean(u_noise, dim=0)
+        gradf = signs_mean * torch.mean(u_noise, dim=0).unsqueeze(0)
     else:
         signs -= signs_mean  # normalize
-        gradf = torch.mean(signs * u_noise, dim=0)
+        gradf = torch.mean(signs * u_noise, dim=0).unsqueeze(0)
 
     # 5. Get the final gradient direction.
-    gradf = torch.div(gradf, torch.linalg.norm(gradf)).unsqueeze(0)
+    gradf = torch.div(gradf, torch.linalg.norm(gradf))
 
     return gradf if params['constraint'] == 'l2' else torch.sign(gradf)
 
@@ -164,7 +205,8 @@ def geometric_progression_for_stepsize(x: torch.Tensor, update: torch.Tensor, di
     """
     def phi():
         # check if current epsilon moves to a wrong class
-        return decision_function(model, (x + epsilon * update), params, count_as_query=True)[0].item()
+        candidate_adv = torch.clip(x + epsilon * update, params['clip_min'], params['clip_max'])
+        return decision_function(model, candidate_adv, params, count_as_query=True)[0].item()
 
     # initialize epsilon
     epsilon = dist / math.sqrt(params['cur_iter'])
@@ -192,12 +234,15 @@ def select_delta(params: dict, dist: float):
     return delta
 
 
-def binary_search(src_image: torch.Tensor, adv_image: torch.Tensor, model: AttackedModel, params: dict):
+def latent_binary_search(src_image: torch.Tensor, adv_image: torch.Tensor,
+                         src_chunks: list, adv_chunks: list, model: AttackedModel, nvae: NVAEModel,
+                         params: dict):
     """
     Binary search to approach the boundary.
     :param src_image (1, c, h, w)
     :param adv_image (1, c, h, w)
     :param model: attacked model
+    :param nvae: NVAEModel
     :param params: constraint, theta
     :return new adv_image on  (1, c, h, w), distance (adv_image, x_src): float
     """
@@ -205,9 +250,17 @@ def binary_search(src_image: torch.Tensor, adv_image: torch.Tensor, model: Attac
     def project(alpha):
 
         if params['constraint'] == 'l2':
-            # linear interpolation
+            # linear interpolation on chunks
+
+            # tmp = [(1 - alpha) * s + alpha * a for (s, a) in zip(src_chunks, adv_chunks)]
+            # tmp[2] = adv_chunks[2]
+            # return tmp
+
+            # return [(1 - alpha) * s + alpha * a for (s, a) in zip(src_chunks, adv_chunks)]
             return (1 - alpha) * src_image + alpha * adv_image
+
         elif params['constraint'] == 'linf':
+            # TODO what happens with linf ?
             clip_min = src_image - alpha
             clip_max = src_image + alpha
             result = torch.where(adv_image > clip_min, adv_image, clip_min)
@@ -216,11 +269,12 @@ def binary_search(src_image: torch.Tensor, adv_image: torch.Tensor, model: Attac
         else:
             raise NotImplementedError(f"Unknown Constraint: {params['constraint']}")
 
-    # Compute distance between x_adv and x_src.
-    initial_dist = compute_distance(src_image, adv_image, params['constraint'])[0].item()
-
     # Choose upper threshold in binary search based on constraint.
     if params['constraint'] == 'linf':
+        # TODO
+        # Compute distance between x_adv and x_src.
+        initial_dist = compute_distance(src_image, adv_image, params['constraint'])[0].item()
+
         high = initial_dist
         threshold = torch.minimum(initial_dist * params['theta'], params['theta'])
     else:
@@ -230,22 +284,45 @@ def binary_search(src_image: torch.Tensor, adv_image: torch.Tensor, model: Attac
     low = 0
 
     # Start Binary Search Loop.
+    out_image = None
     while (high - low) / threshold > 1:
 
         # projection to mid.
         mid = (high + low) / 2.0
+
         mid_image = project(alpha=mid)
+        # mid_image = nvae.decode(project(alpha=mid))
 
         # Update high and low based on model decision
-        decision = decision_function(model, mid_image, params, count_as_query=True)[0].item()  # true or false
-        low = mid if not decision else low  # because mid is not adversarial
-        high = mid if decision else high  # because mid is adversarial
+        is_adversarial = decision_function(model, mid_image, params, count_as_query=True)[0].item()  # true or false
+        if is_adversarial:
+            high = mid  # next interpolation more like src, less like adv
+            out_image = mid_image
+        else:
+            low = mid  # next interpolation more like adv, less like src
 
     # final projection
-    out_image = project(alpha=high)
+    if out_image is None:
+        # test
+        alphas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        for alpha in alphas:
+            sample = [(1 - alpha) * s + alpha * a for (s, a) in zip(src_chunks, adv_chunks)]
+            sample = nvae.decode(sample)
+            # sample = (1 - alpha) * src_image + alpha * adv_image
+            print(f"alpha: {alpha} - is_adv: {decision_function(model, sample, params, count_as_query=False)[0].item()}")
+        print("#" * 20)
+        raise RuntimeError("adv_image is not adversarial!")
 
     # Compute distance of the output image
     dist = compute_distance(src_image, out_image, params['constraint'])[0].item()
+
+    # is_old_adv = decision_function(model, adv_image, params, count_as_query=False)[0].item()
+    # is_new_adv = decision_function(model, out_image, params, count_as_query=False)[0].item()
+    # from torchvision.utils import make_grid
+    # plt.imshow(make_grid(torch.cat([src_image, adv_image, out_image], dim=0), nrow=3).permute(1, 2, 0).cpu().numpy())
+    # plt.axis(False)
+    # plt.title(f"x_src.  old_adv.   new_adv. \n DIST: {dist:.4f} IS_OLD_ADV: {is_old_adv}. IS_NEW_ADV: {is_new_adv}")
+    # plt.show()
 
     return out_image, dist
 
@@ -286,14 +363,15 @@ def initialize(model: AttackedModel, params: dict):
     return initialization
 
 
-def hsja(model: AttackedModel, x_src: torch.Tensor, original_label: int, clip_max: float = 1., clip_min: float = 0.,
-         constraint: str = 'l2', num_iterations: int = 32, gamma: float = 1.0,
-         target_label: int = None, target_image: torch.Tensor = None, max_num_evals: int = 1e4,
-         init_num_evals: int = 100, verbose: bool = True):
+def latent_hsja(model: AttackedModel, nvae: NVAEModel, x_src: torch.Tensor, original_label: int, clip_max: float = 1.,
+                clip_min: float = 0., constraint: str = 'l2', num_iterations: int = 32, gamma: float = 1.0,
+                target_label: int = None, target_image: torch.Tensor = None, max_num_evals: int = 1e4,
+                init_num_evals: int = 100, verbose: bool = True):
     """
-    Main algorithm for HopSkipJumpAttack.
+    HopSkipJumpAttack with Latent NVAE model.
 
     :param model: the object that has predict method.
+    :param nvae: the object gives you chunks (encode) and reconstructions (decode).
     :param x_src: src image to attack
     :param original_label: int
     :param clip_max: upper bound of the image.
@@ -333,14 +411,18 @@ def hsja(model: AttackedModel, x_src: torch.Tensor, original_label: int, clip_ma
     # Initialize.
     x_adv = initialize(model, params)
 
-    # Project the initial x_adv to the boundary.
-    # dist is distance(x_src, x_adv)
-    x_adv, dist = binary_search(x_src, x_adv, model, params)
+    # get chunk only once (ensure determinism!)
+    src_chunks = nvae.encode(x_src)
+    adv_chunks = nvae.encode(x_adv)
 
     # start iterations
     for j in range(num_iterations):
 
         params['cur_iter'] = j + 1
+
+        # Project x_adv to the boundary.
+        # dist is distance(x_src, x_adv)
+        x_adv, dist = latent_binary_search(x_src, x_adv, src_chunks, adv_chunks, model, nvae, params)
 
         # Choose delta.
         delta = select_delta(params, dist)
@@ -350,7 +432,7 @@ def hsja(model: AttackedModel, x_src: torch.Tensor, original_label: int, clip_ma
         num_evals = int(min([num_evals, params['max_num_evals']]))
 
         # find noise image in correct direction (1, c, h, w)
-        update = approximate_gradient(model, x_adv, num_evals, delta, params)
+        update = approximate_gradient(model, nvae, x_adv, num_evals, delta, params)
 
         # search step size = \epsilon_t.
         epsilon = geometric_progression_for_stepsize(x_adv, update, dist, model, params)
@@ -358,8 +440,12 @@ def hsja(model: AttackedModel, x_src: torch.Tensor, original_label: int, clip_ma
         # Update the sample (epsilon ensures it is still adversarial).
         x_adv = torch.clip(x_adv + epsilon * update, clip_min, clip_max)
 
-        # Binary search to return to the boundary.
-        x_adv, dist = binary_search(x_src, x_adv, model, params)
+        adv_chunks = nvae.encode(x_adv)
+
+        # ensure x_adv is still adversarial when autoencode
+        if not decision_function(model, nvae.decode(nvae.encode(x_adv)), params, count_as_query=False)[0].item():
+            # stop here
+            break
 
         if model.log.shape[0] >= model.max_queries:
             break
@@ -371,7 +457,7 @@ def hsja(model: AttackedModel, x_src: torch.Tensor, original_label: int, clip_ma
 
 
 @torch.no_grad()
-def main(data_dir: str, model_dir: str):
+def main(data_dir: str, model_dir: str, nvae_checkpoint: str):
 
     # data
     dataloader = DataLoader(CoupledDataset(folder=data_dir, image_size=32), batch_size=1, shuffle=False)
@@ -379,6 +465,20 @@ def main(data_dir: str, model_dir: str):
     # Attacked CNN
     os.environ["TORCH_HOME"] = model_dir
     base_model = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet32", pretrained=True)
+
+    # NVAE
+    # load nvae pretrained cifar10
+    checkpoint = torch.load(nvae_checkpoint, map_location='cpu')
+
+    # get and update args
+    args = checkpoint['args']
+    args.num_mixture_dec = 10
+
+    # init model and load
+    arch_instance = get_arch_cells(args.arch_instance)
+    nvae = AutoEncoder(args, None, arch_instance)
+    nvae.load_state_dict(checkpoint['state_dict'], strict=False)
+    nvae = NVAEModel(nvae, device='cuda:0')
 
     # params
     constraint = 'l2'
@@ -399,11 +499,19 @@ def main(data_dir: str, model_dir: str):
         pred_src = resnet32.predict(src_x, count_as_query=False)
         pred_trg = resnet32.predict(trg_x, count_as_query=False)
 
+        # pred_src = resnet32.predict(nvae.decode(nvae.encode(src_x)), count_as_query=False)
+        # pred_trg = resnet32.predict(nvae.decode(nvae.encode(trg_x)), count_as_query=False)
+
         if pred_src[0] != src_y[0] or pred_trg[0] != trg_y[0]:
+            print("wrong label predicted! skipping sample!")
             continue
 
-        hsja(resnet32, src_x.to("cuda:0"), original_label=src_y.item(), constraint=constraint,
-             target_image=trg_x.to("cuda:0"), target_label=trg_y.item(), verbose=False)
+        latent_hsja(resnet32, nvae, src_x.to("cuda:0"), original_label=src_y.item(), constraint=constraint,
+                    target_image=trg_x.to("cuda:0"), target_label=trg_y.item(), verbose=False)
+
+        if resnet32.log.shape[0] < n_queries:
+            print("could not be attacked!")
+            continue
 
         final_log, _ = pack([final_log, resnet32.log[:n_queries].unsqueeze(0)], '* n d')
 
@@ -417,15 +525,16 @@ def main(data_dir: str, model_dir: str):
     final_log_min = torch.min(final_log[:, :, 1], dim=0).values.cpu().numpy()
 
     # Plotting
-    plt.plot(x_axis, final_log_mean, color='blue')
-    plt.fill_between(x_axis, final_log_min, final_log_max, color='cyan', alpha=0.3)
+    plt.plot(x_axis, final_log_mean, color='red')
+    plt.fill_between(x_axis, final_log_min, final_log_max, color='pink', alpha=0.3)
     plt.xlabel("# queries")
     plt.ylabel("distance")
     plt.ylim(0., 5.)
     plt.title(f"Targeted HSJA. Constraint = {constraint} ({num_steps} images of Cifar10, ResNet)")
-    plt.savefig(f"./figures/hsja_targeted_distance={constraint}_steps={num_steps}.png")
+    plt.savefig(f"./figures/lhsja-ge_targeted_distance={constraint}_steps={num_steps}.png")
     plt.close()
 
 
 if __name__ == '__main__':
-    main(data_dir="/media/dserez/datasets/cifar10/validation/", model_dir="/media/dserez/runs/adversarial/CNNs/")
+    main(data_dir="/media/dserez/datasets/cifar10/validation/", model_dir="/media/dserez/runs/adversarial/CNNs/",
+         nvae_checkpoint="/media/dserez/runs/NVAE/cifar10/best/3scales_1group.pt")
