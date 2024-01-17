@@ -121,7 +121,7 @@ def sample(rank, args: argparse.Namespace, device: str = 'cuda:0'):
         for n in tqdm(range(0, num_samples, bs)):
 
             logits = model.sample(bs, temperature, device)
-            samples = DiscMixLogistic(logits, num_bits=8).sample()
+            samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample()
             imgs = make_grid(samples).cpu().numpy().transpose(1, 2, 0)
 
             plt.imshow(imgs)

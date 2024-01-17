@@ -83,8 +83,8 @@ def main():
 
             # reconstruct cifar10 test set
             if IS_OURS:
-                logits = nvae.autoencode(batch_x)
-                batch_recons = DiscMixLogistic(logits, num_bits=8).mean()
+                logits = nvae.autoencode(batch_x, deterministic=True)
+                batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
             else:
                 logits = nvae.decode(nvae.encode_deterministic(batch_x))
                 decoder = nvae.decoder_output(logits)
@@ -142,24 +142,18 @@ if __name__ == '__main__':
     Resnet32 clean acc: 0.930 - recons acc: 0.930
     VGG16 clean acc: 0.934 - recons acc: 0.935
     
-    [3SCALES_1GROUP]
-    L2 Error: 0.64144
-    Resnet32 clean acc: 0.930 - recons acc: 0.922
-    VGG16 clean acc: 0.934 - recons acc: 0.929
+    [3SCALES_1GROUP THEIRS DETERMINISTIC!]
+    L2 Error: 0.39227
+    Resnet32 clean acc: 0.930 - recons acc: 0.923
+    VGG16 clean acc: 0.934 - recons acc: 0.928
+        
+    [3SCALES_1GROUP OURS DETERMINISTIC]
     
-    [3SCALES_1GROUP DETERMINISTIC!]
-    L2 Error: 0.41055
-    Resnet32 clean acc: 0.930 - recons acc: 0.922
-    VGG16 clean acc: 0.934 - recons acc: 0.929
-    
-    [3SCALES_1GROUP_OURS]
-    Resnet32 clean acc: 0.930 - recons acc: 0.906
-    VGG16 clean acc: 0.934 - recons acc: 0.922
     """
 
     IS_OURS = False
     CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/3scales_1group.pt'
-    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/ours/cifar10_lr=5e-3_noNF_large/epoch=399.pt'
+    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/ours/replica/epoch=399.pt'
     ADV_BASE_PATH = '/media/dserez/datasets/cifar10/'
     TORCH_HOME = '/media/dserez/runs/adversarial/CNNs/'
     main()

@@ -213,7 +213,7 @@ class AutoEncoder(nn.Module):
                                            nn.Sequential(
                                                nn.ELU(),
                                                Conv2D(channels, 2 * self.num_latent_per_group,
-                                                         kernel_size=1, padding=0, bias=True, weight_norm=True)
+                                                      kernel_size=1, padding=0, bias=True, weight_norm=True)
                                            )
                                            )
 
@@ -273,10 +273,10 @@ class AutoEncoder(nn.Module):
                 channels = int(self.base_channels * self.ch_multiplier)
                 if not is_first:
                     # standard cell
-                    cell = ResidualCellDecoder(channels, channels, upsampling=False, use_SE=self.use_SE)
+                    cell = ResidualCellDecoder(channels, channels, upsampling=False, use_SE=self.use_SE, hidden_mul=3)
                 else:
                     # cell with downsampling (double channels)
-                    cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE)
+                    cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE, hidden_mul=3)
                     self.ch_multiplier /= 2
 
                 block[f'cell_{c}'] = cell
@@ -289,8 +289,9 @@ class AutoEncoder(nn.Module):
 
         in_channels = int(self.base_channels * self.ch_multiplier)
 
-        # OUT --> B, N_MIX * 3, C = 3, H, W
-        out_channels = int(self.num_mixtures * 3 * self.img_channels)
+        # OUT --> B, N_MIX + N_MIX * 3, C = 3, H, W
+        # first n_mix are logits, then for each channel logistic_idx, means and sigmas
+        out_channels = int(self.num_mixtures + self.num_mixtures * 3 * self.img_channels)
 
         to_logits = nn.Sequential(
             nn.ELU(),
@@ -502,7 +503,6 @@ class AutoEncoder(nn.Module):
 
         # get logits for mixture
         logits = self.to_logits(x)
-        logits = rearrange(logits, 'b (n c) h w -> b n c h w', n=self.num_mixtures * 3, c=self.img_channels)
 
         return logits, kl_losses
 
@@ -554,11 +554,10 @@ class AutoEncoder(nn.Module):
 
         # get logits for mixture
         logits = self.to_logits(x)
-        logits = rearrange(logits, 'b (n c) h w -> b n c h w', n=self.num_mixtures * 3, c=self.img_channels)
 
         return logits
 
-    def autoencode(self, gt_images: torch.Tensor):
+    def autoencode(self, gt_images: torch.Tensor, deterministic: bool = False):
         """
         :param gt_images: images in 0__1 range
         :return:
@@ -594,12 +593,10 @@ class AutoEncoder(nn.Module):
         # encoder 0
         x = self.encoder_0(x)
 
-        # obtain q(z_0|x), p(z_0) for KL loss, sample z_0
-
         # encoder q(z_0|x)
         mu_q, log_sig_q = torch.chunk(self.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
         dist = Normal(mu_q, log_sig_q)
-        z_0, _ = dist.sample()  # uses reparametrization trick
+        z_0 = dist.mu if deterministic else dist.sample()[0]
 
         # apply normalizing flows
         if self.use_nf:
@@ -640,7 +637,7 @@ class AutoEncoder(nn.Module):
 
                     # sample z_i as combination of encoder and decoder params
                     dist = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
-                    z_i, _ = dist.sample()
+                    z_i = dist.mu if deterministic else dist.sample()[0]
 
                     # apply NF
                     if self.use_nf:
@@ -658,6 +655,5 @@ class AutoEncoder(nn.Module):
 
         # get logits for mixture
         logits = self.to_logits(x)
-        logits = rearrange(logits, 'b (n c) h w -> b n c h w', n=self.num_mixtures * 3, c=self.img_channels)
 
         return logits

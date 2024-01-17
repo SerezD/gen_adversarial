@@ -306,6 +306,7 @@ class InvertedResidual(nn.Module):
         self.stride = abs(self.stride)
         groups = hidden_dim if g == 0 else g
 
+        # Cin, Cout, stride, ex=6, dil=1, k=5, g=0)
         layers0 = [nn.UpsamplingNearest2d(scale_factor=2)] if self.upsample else []
         layers = [get_batchnorm(Cin, eps=BN_EPS, momentum=0.05),
                   ConvBNSwish(Cin, hidden_dim, k=1),

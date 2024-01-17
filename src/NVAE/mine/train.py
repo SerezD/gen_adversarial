@@ -159,7 +159,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
 
             # forward pass
             logits, kl_terms = model(x)
-            reconstructions = DiscMixLogistic(logits).log_prob(x)
+            reconstructions = DiscMixLogistic(logits, img_channels=3, num_bits=8).log_prob(x)
 
             # reconstruction loss
             rec_loss = - torch.sum(reconstructions, dim=1)
@@ -200,9 +200,9 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
         if rank == 0:
 
             log_dict = {'lr': lr, 'KL beta': beta, 'Lambda': lambda_coeff}
-            for i, (k, v) in enumerate(zip(kl_gammas.detach().cpu().numpy(), kl_terms.detach().cpu().numpy())):
+            for i, (k, v) in enumerate(zip(kl_gammas.cpu().numpy(), kl_terms.cpu().numpy())):
                 log_dict[f'KL gamma {i}'] = k
-                log_dict[f'KL term {i}'] = v
+                log_dict[f'KL term {i} (non weighted)'] = v
 
             run.log(log_dict, step=global_step)
 
@@ -255,7 +255,7 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         # device = x.device
 
         logits, kl_all = model(x)
-        reconstructions = DiscMixLogistic(logits).log_prob(x)
+        reconstructions = DiscMixLogistic(logits, img_channels=3, num_bits=8).log_prob(x)
 
         # reconstruction loss
         rec_loss = - torch.sum(reconstructions, dim=1)
@@ -393,8 +393,8 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
                     x = next(iter(val_loader))[:num_samples].to(f"cuda:{rank}")
                     b, c, h, w = x.shape
 
-                    logits = ddp_model.module.autoencode(x)
-                    x_rec = DiscMixLogistic(logits, num_bits=8).mean()
+                    logits = ddp_model.module.autoencode(x, deterministic=True)
+                    x_rec = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
 
                     display, _ = pack([x, x_rec], '* c h w')
                     display = make_grid(display, nrow=b)
@@ -402,9 +402,9 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
                     run.log({f"media/reconstructions": display}, step=global_step)
 
                     # log samples
-                    for t in [0.7, 0.8, 0.9, 1.0]:
+                    for t in [0.4, 0.6, 0.8, 1.0]:
                         logits = ddp_model.module.sample(num_samples, t, device='cuda:0')
-                        samples = DiscMixLogistic(logits, num_bits=8).sample()
+                        samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample(t)
                         display = wandb.Image(make_grid(samples, nrow=num_samples))
                         run.log({f"media/samples tau={t:.2f}": display}, step=global_step)
 

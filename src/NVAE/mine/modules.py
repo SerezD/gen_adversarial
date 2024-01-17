@@ -245,7 +245,7 @@ class ResidualCellEncoder(nn.Module):
 
 class ResidualCellDecoder(nn.Module):
 
-    def __init__(self, in_channels: int, out_channels: int, upsampling: bool, use_SE: bool):
+    def __init__(self, in_channels: int, out_channels: int, upsampling: bool, use_SE: bool, hidden_mul: int = 6):
         """
         Figure 3a of the paper.
 
@@ -264,7 +264,7 @@ class ResidualCellDecoder(nn.Module):
 
         self.use_se = use_SE
 
-        hidden_dim = in_channels * 6
+        hidden_dim = in_channels * hidden_mul
 
         residual = [nn.UpsamplingNearest2d(scale_factor=2)] if upsampling else []
         residual += [
