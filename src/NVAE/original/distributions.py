@@ -152,12 +152,17 @@ class DiscMixLogistic:
         centered = samples - means                          # B, 3, M, H, W
 
         inv_stdv = torch.exp(- self.log_scales)
+
         plus_in = inv_stdv * (centered + 1. / self.max_val)
         cdf_plus = torch.sigmoid(plus_in)
+
         min_in = inv_stdv * (centered - 1. / self.max_val)
         cdf_min = torch.sigmoid(min_in)
+
         log_cdf_plus = plus_in - F.softplus(plus_in)
         log_one_minus_cdf_min = - F.softplus(min_in)
+
+
         cdf_delta = cdf_plus - cdf_min
         mid_in = inv_stdv * centered
         log_pdf_mid = mid_in - self.log_scales - 2. * F.softplus(mid_in)

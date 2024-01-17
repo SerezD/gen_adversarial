@@ -1,6 +1,20 @@
 import torch
 import numpy as np
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack
+
+
+def gumbel_sampling(logits: torch.Tensor, temperature: float = 1.0):
+    """
+    better that categorical sampling
+    """
+
+    one_hot_probs = torch.zeros_like(logits)
+
+    gumbel_noise = torch.zeros_like(logits).uniform_(1e-5, 1. - 1e-5)
+    gumbel_noise = -torch.log(-torch.log(gumbel_noise))
+    logits = torch.argmax(logits / temperature + gumbel_noise, 1, keepdim=True)
+
+    return one_hot_probs.scatter_(1, logits, 1)
 
 
 def soft_clamp(x: torch.Tensor, n: float = 5.):
@@ -18,7 +32,8 @@ def soft_clamp(x: torch.Tensor, n: float = 5.):
 class Normal:
     def __init__(self, mu, log_sigma, temp=1.):
         self.mu = soft_clamp(mu)
-        self.sigma = temp * (torch.exp(soft_clamp(log_sigma)) + 1e-2)
+        # self.sigma = temp * (torch.exp(soft_clamp(log_sigma)) + 1e-2) TODO does KL explode ?
+        self.sigma = temp * torch.exp(soft_clamp(log_sigma))  # remove extra 1e-2 term
 
     def sample(self):
         """
@@ -26,7 +41,7 @@ class Normal:
             eps is sampled from normal (has the same shape as mu, sigma)
         return z, epsilon
         """
-        eps = torch.normal(mean=0., std=1, size=self.mu.shape, device=self.mu.device)
+        eps = torch.zeros_like(self.mu).normal_()
         z = self.mu + eps * self.sigma
         return z, eps
 
@@ -93,26 +108,33 @@ class DiscMixLogistic:
     and from https://github.com/openai/pixel-cnn/blob/master/pixel_cnn_pp/nn.py
     """
 
-    def __init__(self, params: torch.Tensor, num_bits: int = 8):
+    def __init__(self, params: torch.Tensor, img_channels: int = 3, num_bits: int = 8):
         """
         Defines 3 params for N Logistics: 1. which to take, 2. mu, 3. log_scale
+        Additionally dimension is the final logits probabilities
         Args:
-            params: B, N_MIX * 3, C = 3, H, W
+            params: B, N_MIX + N_MIX * 3 * C, H, W
             num_bits: final image range goes from [0 to 2. ** num_bits -1)
         """
 
+        if img_channels != 3:
+            raise NotImplementedError("actually works only with 3D images")
+
         # hyperparams
-        self.b, N, self.img_channels, self.h, self.w = params.shape
-        self.num_mixtures = N // 3
+        self.img_channels = img_channels
+        self.b, x, self.h, self.w = params.shape
+        self.num_mixtures = x // (1 + img_channels * 3)
         self.max_val = 2. ** num_bits - 1
 
-        # get params for pi (prob of selecting logistic i), means, log_scales
-        p, m, s = torch.chunk(rearrange(params, 'b n c h w -> b n (c h w)'), chunks=3, dim=1)
+        self.logits = rearrange(params[:, :self.num_mixtures], 'b n h w -> b n (h w)')
 
-        # each has shape: B, IMG_C, M, H, W
+        # get params for logistics means, log_scales and coefficients
+        params = rearrange(params[:, self.num_mixtures:], 'b (n c) h w -> b n c (h w)', n=self.num_mixtures)
+        m, s, k = torch.chunk(params, chunks=3, dim=2)
+
         self.means_logits = soft_clamp(m)
         self.log_scales_logits = torch.clamp(s, min=-7.0)
-        self.logistic_logits = torch.tanh(p)  # [-1, 1.] range
+        self.logistic_coefficients = torch.tanh(k)  # [-1, 1.] range
 
     def log_prob(self, samples: torch.Tensor):
         """
@@ -129,10 +151,23 @@ class DiscMixLogistic:
         samples = 2 * samples - 1.0
 
         # expand with num mixtures
-        samples = repeat(samples, 'b c h w -> b n (c h w)', n=self.num_mixtures)
+        samples = repeat(samples, 'b c h w -> b n c (h w)', n=self.num_mixtures)
+
+        # adjust means based on preceding channels (check section 2.2 of PixelCNN++ paper)
+        # https://openreview.net/pdf?id=BJrFC6ceg
+        r_mean = self.means_logits[:, :, 0, :].unsqueeze(2)  # B, N, RED_CH, (H, W)
+
+        g_mean = self.means_logits[:, :, 1, :].unsqueeze(2)
+        g_mean += (self.logistic_coefficients[:, :, 0, :] * samples[:, :, 0, :]).unsqueeze(2)  # B, N, GREEN_CH, (H, W)
+
+        b_mean = self.means_logits[:, :, 2, :].unsqueeze(2)
+        b_mean += (self.logistic_coefficients[:, :, 1, :] * samples[:, :, 0, :]).unsqueeze(2)
+        b_mean += (self.logistic_coefficients[:, :, 2, :] * samples[:, :, 1, :]).unsqueeze(2)  # B, N, BLUE_CH, (H, W)
+
+        adjusted_means, _ = pack([r_mean, g_mean, b_mean], 'b n * d') # B N C (H W)
 
         # compute CDF in the neighborhood of each sample
-        centered = samples - self.means_logits
+        centered = samples - adjusted_means
         neg_scale = torch.exp(- self.log_scales_logits)
 
         plus_in = neg_scale * (centered + 1. / self.max_val)
@@ -147,46 +182,81 @@ class DiscMixLogistic:
         # log probability for edge case of 255
         log_one_minus_cdf_min = - torch.nn.functional.softplus(min_in)
 
-        # probability for all other cases (avoid very low values)
-        cdf_delta = torch.clamp(cdf_plus - cdf_min, 1e-10)
+        # probability for all other cases
+        cdf_delta = cdf_plus - cdf_min
 
-        # select the right output: left edge case, right edge case, normal case
-        # simplified version w.r.t original (TF implementation)
-        # for very low probs, here we simply clamp values to 1e-10
-        log_probs = torch.log(cdf_delta)
-        log_probs = torch.where(samples < -0.999, log_cdf_plus, log_probs)
-        log_probs = torch.where(samples > 0.99, log_one_minus_cdf_min, log_probs)
+        # probability for very low values (avoid nan in following computations)
+        safe_log_probs = neg_scale * centered
+        safe_log_probs = safe_log_probs - self.log_scales_logits - 2. * torch.nn.functional.softplus(safe_log_probs)
+        safe_log_probs = safe_log_probs - np.log(self.max_val / 2)
 
-        # log_probs is B N (C H W)
-        log_probs = log_probs + torch.nn.functional.log_softmax(self.logistic_logits, dim=1)
+        # select the right output: left edge case, right edge case, normal case (filtered for low values)
+        safe_log_probs = torch.where(cdf_delta > 1e-5,
+                                     torch.log(torch.clamp(cdf_delta, min=1e-10)),
+                                     safe_log_probs)
+
+        log_probs = torch.where(samples < -0.999,
+                                log_cdf_plus,
+                                torch.where(samples > 0.99,
+                                            log_one_minus_cdf_min,
+                                            safe_log_probs)
+                                )
+
+        # log_probs is B N C (H W) --> sum over channels
+        # logits is B N (H W)
+        log_probs = torch.sum(log_probs, dim=2) + torch.nn.functional.log_softmax(self.logits, dim=1)
         return torch.logsumexp(log_probs, dim=1)
 
-    def sample(self):
+    def sample(self, temperature: float = 1.):
 
-        # B, (C H W) of indices in range 0 __ N_MIXTURES
-        logistic_selection_mask = torch.distributions.Categorical(logits=self.logistic_logits.permute(0, 2, 1)).sample()
+        # Gumbel Sampling of shape B, (H W) of indices in range 0 __ N_MIXTURES
+        logistic_selection_mask = gumbel_sampling(self.logits, temperature).unsqueeze(2)
 
-        # select parameters (B, (C H W))
-        selected_mu = torch.gather(self.means_logits, 1, logistic_selection_mask.unsqueeze(1)).squeeze(1)
-        selected_scale = torch.gather(self.log_scales_logits, 1, logistic_selection_mask.unsqueeze(1)).squeeze(1)
+        # select parameters and sum on NUM_MIXTURES --> B, C, (H W)
+        selected_mu = torch.sum(self.means_logits * logistic_selection_mask, dim=1)
+        selected_scale = torch.sum(self.log_scales_logits * logistic_selection_mask, dim=1)
+        selected_k = torch.sum(self.logistic_coefficients * logistic_selection_mask, dim=1)
 
         # sample and transform
         base_sample = base_logistic.sample(sample_shape=selected_mu.shape).to(selected_mu.device)
-        x = selected_mu + torch.exp(selected_scale) * base_sample
+        x = selected_mu + torch.exp(selected_scale) / temperature * base_sample  # B, C, (H W)
 
-        # move to 0-1 range
-        x = torch.clip((x + 1) / 2, 0., 1.)
+        # adjust given previous channels (clamp in -1, 1. range)
+        r_x = torch.clamp(x[:, 0, :], -1., 1.)  # B, (H, W)
 
-        return rearrange(x, 'b (c h w) -> b c h w', c=self.img_channels, h=self.h, w=self.w)
+        g_x = x[:, 1, :] + selected_k[:, 0, :] * r_x
+        g_x = torch.clamp(g_x, -1., 1.)  # B, (H, W)
+
+        b_x = x[:, 2, :] + selected_k[:, 1, :] * r_x + selected_k[:, 2, :] * g_x
+        b_x = torch.clamp(b_x, -1., 1.)  # B, (H, W)
+
+        # move to 0-1 range --> B 3 (H W)
+        x = (pack([r_x.unsqueeze(1), g_x.unsqueeze(1), b_x.unsqueeze(1)], 'b * d')[0] + 1) / 2
+
+        return rearrange(x, 'b c (h w) -> b c h w', h=self.h, w=self.w)
 
     def mean(self):
 
         # just scale means by their corresponding probs
-        probs = torch.softmax(self.log_scales_logits, dim=1)
-        res = self.means_logits * probs
-        res = torch.sum(res, dim=1)
+        probs = torch.softmax(self.logits, dim=1).unsqueeze(2)
 
-        # move 0__1 range
-        res = torch.clip((res + 1) / 2, 0., 1.)
+        # select logistic parameters
+        selected_mu = torch.sum(self.means_logits * probs, dim=1)  # B, 3, (H, W)
+        selected_k = torch.sum(self.logistic_coefficients * probs, dim=1)  # B, 3, (H, W)
 
-        return rearrange(res, 'b (c h w) -> b c h w', c=self.img_channels, h=self.h, w=self.w)
+        # don't sample, use mean
+        x = selected_mu
+
+        # adjust given previous channels (clamp in -1, 1. range)
+        r_x = torch.clamp(x[:, 0, :], -1., 1.)  # B, (H, W)
+
+        g_x = x[:, 1, :] + selected_k[:, 0, :] * r_x
+        g_x = torch.clamp(g_x, -1., 1.)  # B, (H, W)
+
+        b_x = x[:, 2, :] + selected_k[:, 1, :] * r_x + selected_k[:, 2, :] * g_x
+        b_x = torch.clamp(b_x, -1., 1.)  # B, (H, W)
+
+        # move to 0-1 range --> B 3 (H W)
+        x = (pack([r_x.unsqueeze(1), g_x.unsqueeze(1), b_x.unsqueeze(1)], 'b * d')[0] + 1) / 2
+
+        return rearrange(x, 'b c (h w) -> b c h w', h=self.h, w=self.w)
