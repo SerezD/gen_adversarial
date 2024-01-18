@@ -150,10 +150,13 @@ if __name__ == '__main__':
     [3SCALES_1GROUP OURS DETERMINISTIC]
     
     """
-
-    IS_OURS = False
-    CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/3scales_1group.pt'
-    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/ours/replica/epoch=399.pt'
     ADV_BASE_PATH = '/media/dserez/datasets/cifar10/'
     TORCH_HOME = '/media/dserez/runs/adversarial/CNNs/'
-    main()
+
+    IS_OURS = True
+    # CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/3scales_1group.pt'
+
+    for epoch in ('50', '100', '150', '200', '250', '300', '350', '399'):
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/epoch={epoch}.pt'
+        print(f'EPOCHS = {epoch}')
+        main()

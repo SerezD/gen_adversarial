@@ -104,9 +104,8 @@ class PairedCellAR(nn.Module):
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, args, writer, arch_instance):
+    def __init__(self, args, arch_instance):
         super(AutoEncoder, self).__init__()
-        self.writer = writer
         self.arch_instance = arch_instance
         self.dataset = args.dataset
         self.crop_output = self.dataset in {'mnist', 'omniglot', 'stacked_mnist'}

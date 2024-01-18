@@ -32,8 +32,8 @@ def soft_clamp(x: torch.Tensor, n: float = 5.):
 class Normal:
     def __init__(self, mu, log_sigma, temp=1.):
         self.mu = soft_clamp(mu)
-        # self.sigma = temp * (torch.exp(soft_clamp(log_sigma)) + 1e-2) TODO does KL explode ?
-        self.sigma = temp * torch.exp(soft_clamp(log_sigma))  # remove extra 1e-2 term
+        # self.sigma = temp * (torch.exp(soft_clamp(log_sigma)) + 1e-2)
+        self.sigma = temp * torch.exp(soft_clamp(log_sigma))  # removed extra 1e-2 term
 
     def sample(self):
         """

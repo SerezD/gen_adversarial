@@ -101,18 +101,28 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
 
     image_size = conf['resolution'][1]
     batch_size = conf['training']['cumulative_bs'] // world_size
+    seed = int(conf['training']['seed'])
+    is_distributed = world_size > 1
 
+    # create dataset objects
     train_dataset = ImageDataset(folder=f'{data_dir}/train', image_size=image_size, ffcv=False)
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
-                                       shuffle=True, drop_last=False)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=False, num_workers=0,
-                                  drop_last=False, sampler=train_sampler)
-
     val_dataset = ImageDataset(folder=f'{data_dir}/validation', image_size=image_size, ffcv=False)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank,
-                                     shuffle=False, drop_last=False)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=False, num_workers=0,
-                                drop_last=False, sampler=val_sampler)
+
+    # create sampler
+    if is_distributed:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
+                                           shuffle=True, drop_last=True, seed=seed)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank,
+                                         shuffle=False, drop_last=False, seed=seed)
+    else:
+        # use default sampler
+        train_sampler, val_sampler = None, None
+
+    # final loader
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, num_workers=0,
+                                  sampler=train_sampler, drop_last=train_sampler is None, shuffle=train_sampler is None)
+
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=True, num_workers=0, sampler=val_sampler)
 
     if rank == 0:
         print(f"[INFO] final batch size per device: {batch_size}")
@@ -144,6 +154,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
     for step, x in enumerate(tqdm(dataloader)):
 
         x = x.to(f'cuda:{rank}')
+
         # b, c, h, w = x.shape
         # device = x.device
 
@@ -202,7 +213,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
             log_dict = {'lr': lr, 'KL beta': beta, 'Lambda': lambda_coeff}
             for i, (k, v) in enumerate(zip(kl_gammas.cpu().numpy(), kl_terms.cpu().numpy())):
                 log_dict[f'KL gamma {i}'] = k
-                log_dict[f'KL term {i} (non weighted)'] = v
+                log_dict[f'KL term {i}'] = v
 
             run.log(log_dict, step=global_step)
 
@@ -340,8 +351,8 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
     weight_decay = float(train_conf['weight_decay'])
     eps = float(train_conf['eps'])
 
-    final_learning_rate = base_learning_rate * math.sqrt(int(train_conf['cumulative_bs']) / 512)
-    final_min_learning_rate = min_learning_rate * math.sqrt(int(train_conf['cumulative_bs']) / 512)
+    final_learning_rate = base_learning_rate * math.sqrt(int(train_conf['cumulative_bs']) / 2048)
+    final_min_learning_rate = min_learning_rate * math.sqrt(int(train_conf['cumulative_bs']) / 2048)
 
     if rank == 0:
         print(f'[INFO] final learning rate: {final_learning_rate}')
@@ -362,6 +373,9 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
     grad_scalar = GradScaler(2 ** 10)  # scale gradient for AMP
 
     for epoch in range(init_epoch, train_conf['epochs']):
+
+        if world_size > 1:
+            train_loader.sampler.set_epoch(epoch)
 
         if rank == 0:
             print(f'[INFO] Epoch {epoch+1}/{train_conf["epochs"]}')
@@ -402,9 +416,9 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
                     run.log({f"media/reconstructions": display}, step=global_step)
 
                     # log samples
-                    for t in [0.4, 0.6, 0.8, 1.0]:
+                    for t in [0.7, 0.8, 0.9, 1.0]:
                         logits = ddp_model.module.sample(num_samples, t, device='cuda:0')
-                        samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample(t)
+                        samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample()
                         display = wandb.Image(make_grid(samples, nrow=num_samples))
                         run.log({f"media/samples tau={t:.2f}": display}, step=global_step)
 
