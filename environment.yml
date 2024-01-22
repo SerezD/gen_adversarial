@@ -21,3 +21,4 @@ dependencies:
       - scheduling_utils
       - pytorch-model-summary
       - wandb
+      - torch-fidelity

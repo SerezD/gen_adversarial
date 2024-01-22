@@ -13,8 +13,8 @@ def kl_balancer(kl_unbalanced_terms: torch.Tensor, beta: float = 1.0, balance: b
 
         kl_terms = torch.mean(kl_unbalanced_terms, dim=0)  # mean on batch
 
-        # proportional to kl_terms (add a small weight --> mainly affects the initial term)
-        kl_coefficients = 0.01 + torch.mean(torch.abs(kl_unbalanced_terms), dim=0, keepdim=True)
+        # proportional to kl_terms
+        kl_coefficients = torch.mean(torch.abs(kl_unbalanced_terms), dim=0, keepdim=True)
 
         # set coefficients as summing to num_groups
         kl_coefficients = kl_coefficients / alpha  # divide by spatial resolution (alpha)

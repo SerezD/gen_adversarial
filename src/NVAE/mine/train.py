@@ -351,8 +351,8 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
     weight_decay = float(train_conf['weight_decay'])
     eps = float(train_conf['eps'])
 
-    final_learning_rate = base_learning_rate * math.sqrt(int(train_conf['cumulative_bs']) / 2048)
-    final_min_learning_rate = min_learning_rate * math.sqrt(int(train_conf['cumulative_bs']) / 2048)
+    final_learning_rate = base_learning_rate #* math.sqrt(int(train_conf['cumulative_bs']) / 128)
+    final_min_learning_rate = min_learning_rate #* math.sqrt(int(train_conf['cumulative_bs']) / 128)
 
     if rank == 0:
         print(f'[INFO] final learning rate: {final_learning_rate}')
@@ -360,6 +360,7 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
     # ddp model, optimizer, scheduler, scaler
     ddp_model = DDP(model, device_ids=[rank])
+
     optimizer = torch.optim.Adamax(ddp_model.parameters(), final_learning_rate, weight_decay=weight_decay, eps=eps)
 
     total_training_steps = len(train_loader) * train_conf['epochs']

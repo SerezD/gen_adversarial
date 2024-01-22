@@ -32,7 +32,6 @@ def soft_clamp(x: torch.Tensor, n: float = 5.):
 class Normal:
     def __init__(self, mu, log_sigma, temp=1.):
         self.mu = soft_clamp(mu)
-        # self.sigma = temp * (torch.exp(soft_clamp(log_sigma)) + 1e-2)
         self.sigma = temp * torch.exp(soft_clamp(log_sigma))  # removed extra 1e-2 term
 
     def sample(self):
@@ -42,7 +41,7 @@ class Normal:
         return z, epsilon
         """
         eps = torch.zeros_like(self.mu).normal_()
-        z = self.mu + eps * self.sigma
+        z = eps.mul_(self.sigma).add_(self.mu)
         return z, eps
 
     def sample_given_eps(self, eps):
@@ -88,9 +87,10 @@ class Normal:
 
         """
 
-        delta_mu_sq = torch.square(self.mu - prior.mu)
-        delta_sigma_sq = torch.square(self.sigma / prior.sigma)
-        kl = 0.5 * (delta_mu_sq / torch.square(self.sigma) + delta_sigma_sq - torch.log(delta_sigma_sq) - 1.)
+        delta_mu = self.mu - prior.mu
+        delta_sigma = self.sigma / prior.sigma
+        first_term = torch.pow(delta_mu, 2) / torch.pow(prior.sigma, 2)
+        kl = 0.5 * (first_term + torch.pow(delta_sigma, 2)) - 0.5 - torch.log(delta_sigma)
         return kl
 
 

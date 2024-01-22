@@ -91,6 +91,7 @@ def main(args):
         global_step, init_epoch = 0, 0
 
     for epoch in range(init_epoch, args.epochs):
+
         # update lrs.
         if args.distributed:
             train_queue.sampler.set_epoch(global_step + args.seed)
@@ -101,6 +102,8 @@ def main(args):
 
         # Logging.
         logging.info('epoch %d', epoch)
+        if args.global_rank == 0:
+            run.log({"epoch": epoch}, global_step)
 
         # Training.
         train_nelbo, global_step = train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_iters, logging, run)
@@ -138,7 +141,7 @@ def main(args):
                        display = wandb.Image(make_grid(samples, nrow=num_samples))
                        run.log({f"media/samples tau={t:.2f}": display}, step=global_step)
 
-            valid_neg_log_p, valid_nelbo = test(valid_queue, model, num_samples=10, args=args, logging=logging, run=run)
+            valid_neg_log_p, valid_nelbo = test(valid_queue, model, step=global_step, args=args, logging=logging, run=run)
             logging.info('valid_nelbo %f', valid_nelbo)
             logging.info('valid neg log p %f', valid_neg_log_p)
             logging.info('valid bpd elbo %f', valid_nelbo * bpd_coeff)
@@ -233,7 +236,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             [loss, recon_loss.mean(), balanced_kl.mean(), norm_loss * wdn_coeff, bn_loss * wdn_coeff],
             dim=0).detach()
 
-        if not rank == 0:
+        if not args.global_rank == 0:
             dist.gather(tensor=losses, dst=0)
         else:
             batch_losses = [torch.zeros_like(losses) for _ in range(args.num_process_per_node)]
@@ -310,7 +313,7 @@ def test(valid_queue, model, step, args, logging, run):
             # save all loss terms to rank 0
             losses = torch.stack([nelbo_batch.mean(), recon_loss.mean(), balanced_kl.mean()], dim=0)
 
-            if not rank == 0:
+            if not args.global_rank == 0:
                 dist.gather(tensor=losses, dst=0)
             else:
                 batch_losses = [torch.zeros_like(losses) for _ in range(args.num_process_per_node)]
