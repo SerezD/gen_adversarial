@@ -21,9 +21,6 @@ dependencies:
   - pip:
       - ffcv
       - tqdm
-      - lmdb
-      - tensorboardX
-      - git+https://github.com/RobustBench/robustbench.git
       - scheduling_utils
       - pytorch-model-summary
       - wandb

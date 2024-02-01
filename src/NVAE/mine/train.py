@@ -17,6 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DistributedSampler, DataLoader
 from pytorch_model_summary import summary
 from torchvision.utils import make_grid
+from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop
 from tqdm import tqdm
 
 from data.datasets import ImageDataset
@@ -55,8 +56,8 @@ def parse_args():
     args = parser.parse_args()
 
     # check data dir exists
-    if not os.path.exists(f'{args.data_path}/train/') or not os.path.exists(f'{args.data_path}/validation/'):
-        raise FileNotFoundError(f'{args.data_path}/train or {args.data_path}/validation does not exist')
+    if not os.path.exists(f'{args.data_path}/train.beton') or not os.path.exists(f'{args.data_path}/validation.beton'):
+        raise FileNotFoundError(f'{args.data_path}/train.beton or {args.data_path}/validation.beton does not exist')
 
     # check checkpoint file exists
     if args.resume_from is not None and not os.path.exists(f'{args.resume_from}'):
@@ -115,38 +116,23 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
     train_dataloader = ffcv_loader(data_dir, batch_size, image_size, seed, rank, is_distributed)
     val_dataloader = ffcv_loader(data_dir, batch_size, image_size, seed, rank, is_distributed, mode='validation')
 
-    # TODO Delete once FFCV is working
-    # create dataset objects
-    # train_dataset = ImageDataset(folder=f'{data_dir}/train', image_size=image_size, ffcv=False)
-    # val_dataset = ImageDataset(folder=f'{data_dir}/validation', image_size=image_size, ffcv=False)
-    #
-    # # create sampler
-    # if is_distributed:
-    #     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
-    #                                        shuffle=True, drop_last=True, seed=seed)
-    #     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank,
-    #                                      shuffle=False, drop_last=False, seed=seed)
-    # else:
-    #     # use default sampler
-    #     train_sampler, val_sampler = None, None
-    #
-    # # final loader
-    # train_dataloader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, num_workers=0,
-    #                               sampler=train_sampler, drop_last=train_sampler is None, shuffle=train_sampler is None)
-    #
-    # val_dataloader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=True, num_workers=0, sampler=val_sampler)
-
     if rank == 0:
         print(f"[INFO] final batch size per device: {batch_size}")
 
-    return train_dataloader, val_dataloader
+    train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
+                                                 RandomResizedCrop((image_size, image_size), scale=(0.6, 1.0)),
+                                                 same_on_batch=False)
+
+    return train_dataloader, val_dataloader, train_augmentations
 
 
-def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.optim.Optimizer, scheduler: Any,
+def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
+                model: AutoEncoder, optimizer: torch.optim.Optimizer, scheduler: Any,
                 grad_scalar: GradScaler, kl_params: dict, sr_params: dict,
                 total_training_steps: int, global_step: int, rank: int, world_size: int, run: wandb.run = None):
     """
     :param dataloader: train dataloader.
+    :param augmentations: augmentation module.
     :param model: model in training mode. Remember to pass ".module" with DDP.
     :param optimizer: optimizer object from torch.optim.Optimizer.
     :param scheduler: scheduler object from scheduling utils.
@@ -165,10 +151,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
 
     for step, x in enumerate(tqdm(dataloader)):
 
-        x = x.to(f'cuda:{rank}')
-
-        # b, c, h, w = x.shape
-        # device = x.device
+        x = augmentations(x[0])
 
         # scheduler step
         lr = scheduler.step(global_step)
@@ -273,9 +256,7 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
 
     for step, x in enumerate(tqdm(dataloader)):
 
-        x = x.to(f'cuda:{rank}')
-        # b, c, h, w = x.shape
-        # device = x.device
+        x = x[0].to(torch.float32)
 
         logits, kl_all = model(x)
         reconstructions = DiscMixLogistic(logits, img_channels=3, num_bits=8).log_prob(x)
@@ -331,7 +312,7 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
     setup(rank, world_size, train_conf)
 
     # Get data loaders.
-    train_loader, val_loader = prepare_data(rank, world_size, args.data_path, config)
+    train_loader, val_loader, train_augmentations = prepare_data(rank, world_size, args.data_path, config)
 
     # create model and move it to GPU with id rank
     model = AutoEncoder(config['autoencoder'], config['resolution']).to(rank)
@@ -387,17 +368,13 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
     for epoch in range(init_epoch, train_conf['epochs']):
 
-        # TODO remove once loader is working
-        # if world_size > 1:
-        #     train_loader.sampler.set_epoch(epoch)
-
         if rank == 0:
             print(f'[INFO] Epoch {epoch+1}/{train_conf["epochs"]}')
             run.log({'epoch': epoch}, step=global_step)
 
         # Training
         ddp_model.train()
-        global_step = epoch_train(train_loader, ddp_model.module, optimizer, scheduler, grad_scalar,
+        global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, scheduler, grad_scalar,
                                   train_conf["kl_anneal"], train_conf["spectral_regularization"],
                                   total_training_steps, global_step, rank, world_size, run)
 
@@ -418,7 +395,7 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
                     num_samples = 8
 
                     # log reconstructions
-                    x = next(iter(val_loader))[:num_samples].to(f"cuda:{rank}")
+                    x = next(iter(val_loader))[0].to(torch.float32)
                     b, c, h, w = x.shape
 
                     logits = ddp_model.module.autoencode(x, deterministic=True)

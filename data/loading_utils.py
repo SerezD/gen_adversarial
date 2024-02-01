@@ -15,7 +15,7 @@ def ffcv_loader(data_path: str, batch_size: int, image_size: int, seed: int, ran
         ToTensor(),
         ToDevice(torch.device(rank), non_blocking=True),
         ToTorchImage(),
-        DivideImage255(dtype=torch.float32)
+        DivideImage255(dtype=torch.float16)
     ]
 
     if mode == 'train':

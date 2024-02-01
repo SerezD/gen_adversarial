@@ -149,12 +149,14 @@ class DiscMixLogistic:
         # https://openreview.net/pdf?id=BJrFC6ceg
         r_mean = self.means_logits[:, :, 0, :].unsqueeze(2)  # B, N, RED_CH, (H, W)
 
+        # B, N, GREEN_CH, (H, W)
         g_mean = self.means_logits[:, :, 1, :].unsqueeze(2)
-        g_mean += (self.logistic_coefficients[:, :, 0, :] * samples[:, :, 0, :]).unsqueeze(2)  # B, N, GREEN_CH, (H, W)
+        g_mean = g_mean + (self.logistic_coefficients[:, :, 0, :] * samples[:, :, 0, :]).unsqueeze(2)
 
+        # B, N, BLUE_CH, (H, W)
         b_mean = self.means_logits[:, :, 2, :].unsqueeze(2)
-        b_mean += (self.logistic_coefficients[:, :, 1, :] * samples[:, :, 0, :]).unsqueeze(2)
-        b_mean += (self.logistic_coefficients[:, :, 2, :] * samples[:, :, 1, :]).unsqueeze(2)  # B, N, BLUE_CH, (H, W)
+        b_mean = b_mean + (self.logistic_coefficients[:, :, 1, :] * samples[:, :, 0, :]).unsqueeze(2)
+        b_mean = b_mean + (self.logistic_coefficients[:, :, 2, :] * samples[:, :, 1, :]).unsqueeze(2)
 
         adjusted_means, _ = pack([r_mean, g_mean, b_mean], 'b n * d')  # B N C (H W)
 
