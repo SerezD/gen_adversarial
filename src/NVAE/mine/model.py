@@ -22,7 +22,7 @@ class AutoEncoder(nn.Module):
 
         # ######################################################################################
         # general params
-        self.img_channels, self.image_resolution, _  = resolution
+        self.img_channels, self.image_resolution, _ = resolution
         self.base_channels, self.ch_multiplier = ae_args['initial_channels'], 1
         self.use_SE = use_SE
 
@@ -276,7 +276,8 @@ class AutoEncoder(nn.Module):
                     cell = ResidualCellDecoder(channels, channels, upsampling=False, use_SE=self.use_SE, hidden_mul=3)
                 else:
                     # cell with downsampling (double channels)
-                    cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE, hidden_mul=3)
+                    cell = ResidualCellDecoder(channels, channels // 2, upsampling=True, use_SE=self.use_SE,
+                                               hidden_mul=3)
                     self.ch_multiplier /= 2
 
                 block[f'cell_{c}'] = cell
@@ -331,7 +332,7 @@ class AutoEncoder(nn.Module):
         Will be multiplied by λ coefficient
         """
 
-        weights = {}   # a dictionary indexed by the shape of weights
+        weights = {}  # a dictionary indexed by the shape of weights
         for l in self.all_conv_layers:
             weight = l.weight_normalized
             weight_mat = weight.view(weight.size(0), -1)
@@ -353,7 +354,7 @@ class AutoEncoder(nn.Module):
 
                     self.sr_v[i] = nn.functional.normalize(
                         torch.ones((num_w, col), device=weights[i].device).normal_(0, 1),
-                         dim=1, eps=1e-3)
+                        dim=1, eps=1e-3)
 
                     # increase the number of iterations for the first time
                     num_iter = 10 * self.num_power_iter
@@ -557,11 +558,13 @@ class AutoEncoder(nn.Module):
 
         return logits
 
-    def autoencode(self, gt_images: torch.Tensor, deterministic: bool = False):
+    def encode(self, gt_images: torch.Tensor, deterministic: bool = False):
         """
         :param gt_images: images in 0__1 range
         :return:
         """
+
+        chunks = []
 
         b = gt_images.shape[0]
 
@@ -601,6 +604,8 @@ class AutoEncoder(nn.Module):
         # apply normalizing flows
         if self.use_nf:
             z_0 = self.nf_cells.get_submodule('nf_0:0')(z_0)
+
+        chunks.append(z_0)
 
         # decoding phase
 
@@ -643,6 +648,50 @@ class AutoEncoder(nn.Module):
                     if self.use_nf:
                         z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
 
+                    chunks.append(z_i)
+
+                    # combine x and z_i
+                    x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
+
+            # upsampling at the end of each scale
+            if s < self.num_scales - 1:
+                x = scale.get_submodule('upsampling')(x)
+
+        return chunks
+
+    def decode(self, chunks: list):
+
+        chunks = chunks.copy()
+
+        z_0 = chunks.pop(0)
+        b = z_0.shape[0]
+
+        # start from constant prior
+        x = self.const_prior.expand(b, -1, -1, -1)
+
+        # first combiner (inject z_0)
+        x = self.decoder_combiners.get_submodule('combiner_0:0')(x, z_0)
+
+        for s in range(self.num_scales):
+
+            scale = self.decoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                if not (s == 0 and g == 0):
+
+                    # group forward
+                    group = scale.get_submodule(f'group_{g}')
+
+                    for c in range(self.num_cells_per_group):
+                        x = group.get_submodule(f'cell_{c}')(x)
+
+                    z_i = chunks.pop(0)
+
+                    # apply NF
+                    if self.use_nf:
+                        z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
+
                     # combine x and z_i
                     x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
 
@@ -657,3 +706,11 @@ class AutoEncoder(nn.Module):
         logits = self.to_logits(x)
 
         return logits
+
+    def autoencode(self, gt_images: torch.Tensor, deterministic: bool = False):
+        """
+        :param gt_images: images in 0__1 range
+        :return:
+        """
+
+        return self.decode(self.encode(gt_images, deterministic))

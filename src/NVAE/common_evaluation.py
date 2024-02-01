@@ -69,7 +69,7 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
         checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
         nvae.load_state_dict(checkpoint['state_dict'])
-        nvae.cuda().eval()
+        nvae.to(f'cuda:{rank}').eval()
 
     else:
 
@@ -96,11 +96,11 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
         # TEST L2 ERROR
         print(f'[INFO] reconstructing...')
-        recons = torch.empty((0, 3, 32, 32), device='cuda:0')
+        recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
 
         for b in tqdm(range(0, data_n, batch_size)):
 
-            batch_x = x_test[b:b + batch_size].cuda()
+            batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
 
             # reconstruct cifar10 test set
             if IS_OURS:
@@ -122,28 +122,30 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
         with autocast():
             for _ in tqdm(range(500)):
                 if IS_OURS:
-                    nvae.sample(batch_size, temperature, 'cuda')
+                    nvae.sample(batch_size, temperature, f'cuda:{rank}')
                 else:
                     nvae.sample(batch_size, temperature)
-        nvae.eval()
+            nvae.eval()
 
         # SAMPLING
         print(f'[INFO] sampling...')
 
         # metrics for testing
-        fid_score = FrechetInceptionDistance().to('cuda')
-        is_score = InceptionScore().to('cuda')
+        fid_score = FrechetInceptionDistance().to(f'cuda:{rank}')
+        is_score = InceptionScore().to(f'cuda:{rank}')
         conv = ConvertImageDtype(torch.uint8)
 
         for b in tqdm(range(0, data_n, batch_size)):
 
-            batch_x = x_test[b:b + batch_size].cuda()
+            batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
 
             if IS_OURS:
-                logits = nvae.sample(batch_size, temperature, 'cuda')
-                samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample(temperature)
+                with autocast():
+                    logits = nvae.sample(batch_size, temperature, f'cuda:{rank}')
+                    samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample(temperature)
             else:
-                logits = nvae.sample(batch_size, temperature)
+                with autocast():
+                    logits = nvae.sample(batch_size, temperature)
                 samples = nvae.decoder_output(logits).sample(temperature)
 
             if b == 0:
@@ -151,7 +153,7 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
                 plt.imshow(imgs)
                 plt.axis(False)
                 plt.title(f"Temperature={temperature}, OURS: {IS_OURS}")
-                plt.savefig(f"./samples_test/samples_{'OURS' if IS_OURS else 'ORIGINAL'}.png")
+                plt.savefig(f"./samples_test/samples_{'OURS' if IS_OURS else 'ORIGINAL'}_temp={temperature}.png")
                 plt.close()
 
             # FID
@@ -179,6 +181,16 @@ if __name__ == '__main__':
     L2 Error:   0.35781
     FID Score:  70.8052
     IS Score:   4.3772 +- 0.1242
+    
+    [3SCALES_1GROUP THEIRS LARGE]
+    L2 Error:   0.44198
+    FID Score:  63.0407
+    IS Score:   4.7530 +- 0.1479
+    
+    [3SCALES_1GROUP THEIRS LAST_HOPE]
+    L2 Error: 0.53891
+    FID score: 69.3384
+    IS score: 4.3928 +- 0.0846
 
     [3SCALES_1GROUP OURS]
     L2 Error: 0.43765
@@ -205,26 +217,20 @@ if __name__ == '__main__':
     FID score: 67.3362
     IS score: 4.6309 +- 0.0779
     
-    [3SCALES_1GROUP OURS DISTRIBUTED]
-    L2 Error: 0.49255
-    FID score: 127.1432
-    IS score: 2.9860 +- 0.0352
-    
-    [3SCALES_1GROUP OURS DISTRIBUTED BS512]
-    L2 Error: 0.47111
-    FID score: 181.6541
-    IS score: 2.3540 +- 0.0380
+    [3SCALES_1GROUP OURS DISTRIBUTED SYNC BN]
+    L2 Error: 0.61473
     """
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
 
-    IS_OURS = True
+    IS_OURS = False
 
     if IS_OURS:
-        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/bs512.pt'
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/dist.pt'
     else:
-        CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/3scales_1group_latest.pt'
+        CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/last_hope.pt'
 
+    # main(0, 0.8, IS_OURS, CKPT_NVAE, DATA_PATH)
     try:
         mp.spawn(main, args=(0.8, IS_OURS, CKPT_NVAE, DATA_PATH), nprocs=1)
     except KeyboardInterrupt as k:

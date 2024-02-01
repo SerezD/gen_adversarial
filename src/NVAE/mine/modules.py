@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
+from torch.nn import SyncBatchNorm, SiLU
 
 
 def normalize_weight(log_weight_norm: nn.Parameter, weight: nn.Parameter) -> nn.Parameter:
@@ -225,10 +226,19 @@ class ResidualCellEncoder(nn.Module):
 
         # (BN - SWISH) + conv 3x3 + (BN - SWISH) + conv 3x3 + SE
         # downsampling in the first conv, depending on stride
+        # self.residual = nn.Sequential(
+        #     SyncBatchNormSwish(in_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
+        #     Conv2D(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=True, weight_norm=True),
+        #     SyncBatchNormSwish(out_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
+        #     Conv2D(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True, weight_norm=True)
+        # )
+
         self.residual = nn.Sequential(
-            SyncBatchNormSwish(in_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
+            SyncBatchNorm(in_channels, eps=1e-5, momentum=0.05),
+            SiLU(),
             Conv2D(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=True, weight_norm=True),
-            SyncBatchNormSwish(out_channels, eps=1e-5, momentum=0.05),  # using original NVIDIA code for this
+            SyncBatchNorm(out_channels, eps=1e-5, momentum=0.05),
+            SiLU(),
             Conv2D(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True, weight_norm=True)
         )
 
@@ -267,14 +277,26 @@ class ResidualCellDecoder(nn.Module):
         hidden_dim = in_channels * hidden_mul
 
         residual = [nn.UpsamplingNearest2d(scale_factor=2)] if upsampling else []
+        # residual += [
+        #     nn.SyncBatchNorm(in_channels, eps=1e-5, momentum=0.05),
+        #     Conv2D(in_channels, hidden_dim, kernel_size=1, bias=False, weight_norm=False),
+        #     SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
+        #     Conv2D(hidden_dim, hidden_dim, kernel_size=5, padding=2, groups=hidden_dim, bias=False, weight_norm=False),
+        #     SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
+        #     Conv2D(hidden_dim, out_channels, kernel_size=1, bias=False, weight_norm=False),
+        #     nn.SyncBatchNorm(out_channels, eps=1e-5, momentum=0.05)
+        # ]
+
         residual += [
-            nn.SyncBatchNorm(in_channels, eps=1e-5, momentum=0.05),
+            SyncBatchNorm(in_channels, eps=1e-5, momentum=0.05),
             Conv2D(in_channels, hidden_dim, kernel_size=1, bias=False, weight_norm=False),
-            SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
+            SyncBatchNorm(hidden_dim, eps=1e-5, momentum=0.05),
+            SiLU(),
             Conv2D(hidden_dim, hidden_dim, kernel_size=5, padding=2, groups=hidden_dim, bias=False, weight_norm=False),
-            SyncBatchNormSwish(hidden_dim, eps=1e-5, momentum=0.05),
+            SyncBatchNorm(hidden_dim, eps=1e-5, momentum=0.05),
+            SiLU(),
             Conv2D(hidden_dim, out_channels, kernel_size=1, bias=False, weight_norm=False),
-            nn.SyncBatchNorm(out_channels, eps=1e-5, momentum=0.05)
+            SyncBatchNorm(out_channels, eps=1e-5, momentum=0.05)
         ]
 
         if self.use_se:

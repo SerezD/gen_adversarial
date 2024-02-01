@@ -181,7 +181,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
             beta = max(min(1.0, beta), float(kl_params["kl_const_coeff"]))
 
             # balance kl (Appendix A of NVAE paper, γ term on each scale)
-            final_kl, kl_gammas, kl_terms = kl_balancer(kl_terms, beta, balance=True, alpha=model.kl_alpha)
+            final_kl, kl_gammas, kl_terms = kl_balancer(kl_terms, beta, world_size, balance=True, alpha=model.kl_alpha)
 
             # compute final loss
             loss = torch.mean(rec_loss + final_kl)
@@ -431,6 +431,7 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
                 ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/epoch={epoch:02d}.pt"
                 torch.save({'epoch': epoch + 1, 'global_step': global_step,
+                            'configuration': config,
                             'state_dict': ddp_model.module.state_dict()},
                            ckpt_file)
 
@@ -438,6 +439,14 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
     if rank == 0:
         wandb.finish()
+
+        print(f'[INFO] Saving Checkpoint')
+
+        ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/last.pt"
+        torch.save({'epoch': train_conf["epochs"], 'global_step': global_step,
+                    'configuration': config,
+                    'state_dict': ddp_model.module.state_dict()},
+                   ckpt_file)
 
     cleanup()
 
