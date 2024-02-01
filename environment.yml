@@ -1,4 +1,4 @@
-name: adversarial_test
+name: gen_adversarial
 channels:
   - pytorch
   - nvidia
@@ -12,8 +12,14 @@ dependencies:
   - einops
   - kornia
   - matplotlib
+  - cupy
+  - pkg-config
+  - libjpeg-turbo>=2.1.4
+  - opencv
+  - numba==0.56.2  # solves import error!
   - pip
   - pip:
+      - ffcv
       - tqdm
       - lmdb
       - tensorboardX

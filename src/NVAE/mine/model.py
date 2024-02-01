@@ -5,7 +5,6 @@ from einops import rearrange, pack
 import torch
 from torch import nn
 
-from src.NVAE.mine.custom_ops.inplaced_sync_batchnorm import SyncBatchNormSwish
 from src.NVAE.mine.modules import ResidualCellEncoder, EncCombinerCell, NFBlock, ResidualCellDecoder, DecCombinerCell, \
     ARConv2d, Conv2D
 from src.NVAE.mine.distributions import Normal
@@ -316,8 +315,7 @@ class AutoEncoder(nn.Module):
                 self.all_log_norm.append(layer.log_weight_norm)
                 self.all_conv_layers.append(layer)
 
-            if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm) or \
-                    isinstance(layer, SyncBatchNormSwish):
+            if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm):
                 self.all_bn_layers.append(layer)
 
         # left/right singular vectors used for SR

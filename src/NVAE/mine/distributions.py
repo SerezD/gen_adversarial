@@ -94,14 +94,6 @@ class Normal:
         return kl
 
 
-# pytorch example for Logistic Distribution --> https://pytorch.org/docs/stable/distributions.html
-# why the logistic distribution does not exist in pytorch? --> https://github.com/pytorch/pytorch/issues/7857
-# using logistic normal as base, then transform it when mean, scale parameters are picked.
-base_distribution = torch.distributions.Uniform(1e-5, 1 - 1e-5)  # avoiding corner values
-transforms = [torch.distributions.SigmoidTransform().inv]
-base_logistic = torch.distributions.TransformedDistribution(base_distribution, transforms)
-
-
 class DiscMixLogistic:
     """
     code adapted from https://github.com/mgp123/nvae/blob/main/model/distributions.py
@@ -132,7 +124,7 @@ class DiscMixLogistic:
         params = rearrange(params[:, self.num_mixtures:], 'b (n c) h w -> b n c (h w)', n=self.num_mixtures)
         m, s, k = torch.chunk(params, chunks=3, dim=2)
 
-        self.means_logits = soft_clamp(m)
+        self.means_logits = m
         self.log_scales_logits = torch.clamp(s, min=-7.0)
         self.logistic_coefficients = torch.tanh(k)  # [-1, 1.] range
 
@@ -164,7 +156,7 @@ class DiscMixLogistic:
         b_mean += (self.logistic_coefficients[:, :, 1, :] * samples[:, :, 0, :]).unsqueeze(2)
         b_mean += (self.logistic_coefficients[:, :, 2, :] * samples[:, :, 1, :]).unsqueeze(2)  # B, N, BLUE_CH, (H, W)
 
-        adjusted_means, _ = pack([r_mean, g_mean, b_mean], 'b n * d') # B N C (H W)
+        adjusted_means, _ = pack([r_mean, g_mean, b_mean], 'b n * d')  # B N C (H W)
 
         # compute CDF in the neighborhood of each sample
         centered = samples - adjusted_means
@@ -217,8 +209,12 @@ class DiscMixLogistic:
         selected_scale = torch.sum(self.log_scales_logits * logistic_selection_mask, dim=1)
         selected_k = torch.sum(self.logistic_coefficients * logistic_selection_mask, dim=1)
 
-        # sample and transform
-        base_sample = base_logistic.sample(sample_shape=selected_mu.shape).to(selected_mu.device)
+        # sample from logistic with default parameters and then scale
+        # pytorch example for Logistic Distribution --> https://pytorch.org/docs/stable/distributions.html
+        # why the logistic distribution does not exist in pytorch? --> https://github.com/pytorch/pytorch/issues/7857
+        base_sample = torch.zeros_like(selected_mu).uniform_(1e-5, 1. - 1e-5)  # avoiding corner values
+        base_sample = torch.log(base_sample) - torch.log(1 - base_sample)
+
         x = selected_mu + torch.exp(selected_scale) / temperature * base_sample  # B, C, (H W)
 
         # adjust given previous channels (clamp in -1, 1. range)

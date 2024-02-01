@@ -1,9 +1,7 @@
 import torch
-import torch.distributed as dist
 
 
-def kl_balancer(kl_unbalanced_terms: torch.Tensor, beta: float = 1.0, world_size: int = None, balance: bool = False,
-                alpha: torch.Tensor = None):
+def kl_balancer(kl_unbalanced_terms: torch.Tensor, beta: float = 1.0, balance: bool = False, alpha: torch.Tensor = None):
 
     if balance and beta < 1.0:
 
@@ -16,8 +14,6 @@ def kl_balancer(kl_unbalanced_terms: torch.Tensor, beta: float = 1.0, world_size
 
         # proportional to kl_terms (on all devices)
         kl_coefficients = torch.mean(torch.abs(kl_unbalanced_terms), dim=0, keepdim=True)
-        dist.all_reduce(kl_coefficients, op=dist.ReduceOp.SUM)
-        kl_coefficients = kl_coefficients / world_size
 
         # set coefficients as summing to num_groups
         kl_coefficients = kl_coefficients / alpha  # divide by spatial resolution (alpha)

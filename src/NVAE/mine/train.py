@@ -1,6 +1,6 @@
 import argparse
-import math
 import os
+import warnings
 from typing import Any
 import wandb
 
@@ -20,6 +20,7 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.datasets import ImageDataset
+from data.loading_utils import ffcv_loader
 from src.NVAE.mine.distributions import DiscMixLogistic
 from src.NVAE.mine.model import AutoEncoder
 from src.NVAE.mine.utils import kl_balancer
@@ -36,7 +37,7 @@ def parse_args():
                         help='.yaml configuration file')
 
     parser.add_argument('--data_path', type=str, required=True,
-                        help='directory of dataset, contains a "train" and "validation" subdirectories')
+                        help='directory of ffcv datasets (.beton files)')
 
     parser.add_argument('--checkpoint_base_path', type=str, default='./runs/',
                         help='directory where checkpoints are saved')
@@ -80,8 +81,15 @@ def get_model_conf(filepath: str):
 
 def setup(rank: int, world_size: int, train_conf: dict):
 
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12345'
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ["MASTER_ADDR"] = "localhost"
+        if rank == 0:
+            warnings.warn("ENV VARIABLE 'MASTER_ADDR' not specified. Setting 'MASTER_ADDR'='localhost'")
+
+    if 'MASTER_PORT' not in os.environ:
+        os.environ["MASTER_PORT"] = "29500"
+        if rank == 0:
+            warnings.warn("ENV VARIABLE 'MASTER_PORT' not specified. 'MASTER_PORT'='29500'")
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -104,25 +112,29 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
     seed = int(conf['training']['seed'])
     is_distributed = world_size > 1
 
+    train_dataloader = ffcv_loader(data_dir, batch_size, image_size, seed, rank, is_distributed)
+    val_dataloader = ffcv_loader(data_dir, batch_size, image_size, seed, rank, is_distributed, mode='validation')
+
+    # TODO Delete once FFCV is working
     # create dataset objects
-    train_dataset = ImageDataset(folder=f'{data_dir}/train', image_size=image_size, ffcv=False)
-    val_dataset = ImageDataset(folder=f'{data_dir}/validation', image_size=image_size, ffcv=False)
-
-    # create sampler
-    if is_distributed:
-        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
-                                           shuffle=True, drop_last=True, seed=seed)
-        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank,
-                                         shuffle=False, drop_last=False, seed=seed)
-    else:
-        # use default sampler
-        train_sampler, val_sampler = None, None
-
-    # final loader
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, num_workers=0,
-                                  sampler=train_sampler, drop_last=train_sampler is None, shuffle=train_sampler is None)
-
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=True, num_workers=0, sampler=val_sampler)
+    # train_dataset = ImageDataset(folder=f'{data_dir}/train', image_size=image_size, ffcv=False)
+    # val_dataset = ImageDataset(folder=f'{data_dir}/validation', image_size=image_size, ffcv=False)
+    #
+    # # create sampler
+    # if is_distributed:
+    #     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank,
+    #                                        shuffle=True, drop_last=True, seed=seed)
+    #     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank,
+    #                                      shuffle=False, drop_last=False, seed=seed)
+    # else:
+    #     # use default sampler
+    #     train_sampler, val_sampler = None, None
+    #
+    # # final loader
+    # train_dataloader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, num_workers=0,
+    #                               sampler=train_sampler, drop_last=train_sampler is None, shuffle=train_sampler is None)
+    #
+    # val_dataloader = DataLoader(val_dataset, batch_size=batch_size, pin_memory=True, num_workers=0, sampler=val_sampler)
 
     if rank == 0:
         print(f"[INFO] final batch size per device: {batch_size}")
@@ -181,7 +193,7 @@ def epoch_train(dataloader: DataLoader, model: AutoEncoder, optimizer: torch.opt
             beta = max(min(1.0, beta), float(kl_params["kl_const_coeff"]))
 
             # balance kl (Appendix A of NVAE paper, γ term on each scale)
-            final_kl, kl_gammas, kl_terms = kl_balancer(kl_terms, beta, world_size, balance=True, alpha=model.kl_alpha)
+            final_kl, kl_gammas, kl_terms = kl_balancer(kl_terms, beta, balance=True, alpha=model.kl_alpha)
 
             # compute final loss
             loss = torch.mean(rec_loss + final_kl)
@@ -375,8 +387,9 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
     for epoch in range(init_epoch, train_conf['epochs']):
 
-        if world_size > 1:
-            train_loader.sampler.set_epoch(epoch)
+        # TODO remove once loader is working
+        # if world_size > 1:
+        #     train_loader.sampler.set_epoch(epoch)
 
         if rank == 0:
             print(f'[INFO] Epoch {epoch+1}/{train_conf["epochs"]}')
