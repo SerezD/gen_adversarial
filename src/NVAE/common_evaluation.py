@@ -94,38 +94,38 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
     with torch.no_grad():
 
-        # TEST L2 ERROR
-        print(f'[INFO] reconstructing...')
-        recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
+        # # TEST L2 ERROR
+        # print(f'[INFO] reconstructing...')
+        # recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
+        #
+        # for b in tqdm(range(0, data_n, batch_size)):
+        #
+        #     batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
+        #
+        #     # reconstruct cifar10 test set
+        #     if IS_OURS:
+        #         logits = nvae.autoencode(batch_x, deterministic=True)
+        #         batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
+        #     else:
+        #         logits = nvae.decode(nvae.encode_deterministic(batch_x))
+        #         decoder = nvae.decoder_output(logits)
+        #         batch_recons = decoder.mean()
+        #
+        #     recons, _ = pack([recons, batch_recons], '* c h w')
+        #
+        # # L2 error:
+        # l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
+        # print(f"L2 Error: {l2:.5f}")
 
-        for b in tqdm(range(0, data_n, batch_size)):
-
-            batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
-
-            # reconstruct cifar10 test set
-            if IS_OURS:
-                logits = nvae.autoencode(batch_x, deterministic=True)
-                batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
-            else:
-                logits = nvae.decode(nvae.encode_deterministic(batch_x))
-                decoder = nvae.decoder_output(logits)
-                batch_recons = decoder.mean()
-
-            recons, _ = pack([recons, batch_recons], '* c h w')
-
-        # L2 error:
-        l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
-        print(f"L2 Error: {l2:.5f}")
-
-        print(f'[INFO] adjusting batch norm...')
-        nvae.train()
-        with autocast():
-            for _ in tqdm(range(500)):
-                if IS_OURS:
-                    nvae.sample(batch_size, temperature, f'cuda:{rank}')
-                else:
-                    nvae.sample(batch_size, temperature)
-            nvae.eval()
+        # print(f'[INFO] adjusting batch norm...')
+        # nvae.train()
+        # with autocast():
+        #     for _ in tqdm(range(500)):
+        #         if IS_OURS:
+        #             nvae.sample(batch_size, temperature, f'cuda:{rank}')
+        #         else:
+        #             nvae.sample(batch_size, temperature)
+        #     nvae.eval()
 
         # SAMPLING
         print(f'[INFO] sampling...')
@@ -223,10 +223,10 @@ if __name__ == '__main__':
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
 
-    IS_OURS = False
+    IS_OURS = True
 
     if IS_OURS:
-        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/dist.pt'
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/run_2.pt'
     else:
         CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/last_hope.pt'
 

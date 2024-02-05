@@ -1,6 +1,7 @@
 import argparse
 import os
 import warnings
+import socket
 from typing import Any
 import wandb
 
@@ -10,17 +11,15 @@ import torch
 from einops import pack
 from scheduling_utils.schedulers_cpp import LinearCosineScheduler, CosineScheduler
 from torch.cuda.amp import autocast, GradScaler
-import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.backends import cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DistributedSampler, DataLoader
+from torch.utils.data import DataLoader
 from pytorch_model_summary import summary
 from torchvision.utils import make_grid
-from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop
+from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip
 from tqdm import tqdm
 
-from data.datasets import ImageDataset
 from data.loading_utils import ffcv_loader
 from src.NVAE.mine.distributions import DiscMixLogistic
 from src.NVAE.mine.model import AutoEncoder
@@ -55,17 +54,20 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # check data dir exists
-    if not os.path.exists(f'{args.data_path}/train.beton') or not os.path.exists(f'{args.data_path}/validation.beton'):
-        raise FileNotFoundError(f'{args.data_path}/train.beton or {args.data_path}/validation.beton does not exist')
+    if WORLD_RANK == 0:
 
-    # check checkpoint file exists
-    if args.resume_from is not None and not os.path.exists(f'{args.resume_from}'):
-        raise FileNotFoundError(f'could not find the specified checkpoint: {args.resume_from}')
+        # check data dir exists
+        if (not os.path.exists(f'{args.data_path}/train.beton') or
+                not os.path.exists(f'{args.data_path}/validation.beton')):
+            raise FileNotFoundError(f'{args.data_path}/train.beton or {args.data_path}/validation.beton does not exist')
 
-    # create checkpoint out directory
-    if not os.path.exists(f'{args.checkpoint_base_path}/{args.run_name}'):
-        os.makedirs(f'{args.checkpoint_base_path}/{args.run_name}')
+        # check checkpoint file exists
+        if args.resume_from is not None and not os.path.exists(f'{args.resume_from}'):
+            raise FileNotFoundError(f'could not find the specified checkpoint: {args.resume_from}')
+
+        # create checkpoint out directory
+        if not os.path.exists(f'{args.checkpoint_base_path}/{args.run_name}'):
+            os.makedirs(f'{args.checkpoint_base_path}/{args.run_name}')
 
     return args
 
@@ -101,6 +103,8 @@ def setup(rank: int, world_size: int, train_conf: dict):
     torch.cuda.manual_seed(train_conf['seed'])
     torch.cuda.manual_seed_all(train_conf['seed'])
 
+    dist.barrier()
+
 
 def cleanup():
     dist.destroy_process_group()
@@ -116,12 +120,11 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
     train_dataloader = ffcv_loader(data_dir, batch_size, image_size, seed, rank, is_distributed)
     val_dataloader = ffcv_loader(data_dir, batch_size, image_size, seed, rank, is_distributed, mode='validation')
 
-    if rank == 0:
-        print(f"[INFO] final batch size per device: {batch_size}")
-
     train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
-                                                 RandomResizedCrop((image_size, image_size), scale=(0.6, 1.0)),
                                                  same_on_batch=False)
+
+    if WORLD_RANK == 0:
+        print(f"[INFO] final batch size per device: {batch_size}")
 
     return train_dataloader, val_dataloader, train_augmentations
 
@@ -129,7 +132,7 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
 def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
                 model: AutoEncoder, optimizer: torch.optim.Optimizer, scheduler: Any,
                 grad_scalar: GradScaler, kl_params: dict, sr_params: dict,
-                total_training_steps: int, global_step: int, rank: int, world_size: int, run: wandb.run = None):
+                total_training_steps: int, global_step: int, run: wandb.run = None):
     """
     :param dataloader: train dataloader.
     :param augmentations: augmentation module.
@@ -141,13 +144,11 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
     :param sr_params: spectral regularization parameters for lambda computation
     :param total_training_steps: total training steps on all epochs.
     :param global_step: used by scheduler.
-    :param rank: for computing everything on the correct device.
-    :param world_size: total number of devices
     :param run: wandb run object (if rank is 0).
     """
 
     # for logging: loss, rec, kl, spectral, bn
-    epoch_losses = torch.empty((0, 5), device=f"cuda:{rank}")
+    epoch_losses = torch.empty((0, 5), device=f"cuda:{LOCAL_RANK}")
 
     for step, x in enumerate(tqdm(dataloader)):
 
@@ -203,7 +204,12 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
         grad_scalar.update()
 
         # to log at each step
-        if rank == 0:
+        dist.all_reduce(kl_gammas, op=dist.ReduceOp.SUM)
+        dist.all_reduce(kl_terms, op=dist.ReduceOp.SUM)
+        kl_gammas = kl_gammas / WORLD_SIZE
+        kl_terms = kl_terms / WORLD_SIZE
+
+        if WORLD_RANK == 0:
 
             log_dict = {'lr': lr, 'KL beta': beta, 'Lambda': lambda_coeff}
             for i, (k, v) in enumerate(zip(kl_gammas.cpu().numpy(), kl_terms.cpu().numpy())):
@@ -212,25 +218,21 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
 
             run.log(log_dict, step=global_step)
 
-        # save all loss terms to rank 0
+        # save all loss terms
         losses = torch.stack(
             [loss, rec_loss.mean(), final_kl.mean(), spectral_norm_term * lambda_coeff, batch_norm_term * lambda_coeff],
             dim=0).detach()
 
-        if not rank == 0:
-            dist.gather(tensor=losses, dst=0)
-        else:
-            batch_losses = [torch.zeros_like(losses) for _ in range(world_size)]
-            dist.gather(gather_list=batch_losses, tensor=losses)
+        dist.all_reduce(losses, op=dist.ReduceOp.SUM)
+        losses = losses / WORLD_SIZE
 
-            # loss, rec, kl, spectral, bn
-            epoch_losses , _ = pack([epoch_losses, torch.mean(torch.stack(batch_losses, dim=0), dim=0).unsqueeze(0)],
-                                    '* n')
+        # loss, rec, kl, spectral, bn
+        epoch_losses, _ = pack([epoch_losses, losses], '* n')
 
         global_step += 1
 
     # log epoch loss
-    if rank == 0:
+    if WORLD_RANK == 0:
 
         epoch_losses = torch.mean(epoch_losses, dim=0)
 
@@ -248,15 +250,14 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
     return global_step
 
 
-def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: int,
-                     rank: int, world_size: int, run: wandb.run = None):
+def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: int, run: wandb.run = None):
 
     # for logging: loss, rec, kl
-    epoch_losses = torch.empty((0, 3), device=f"cuda:{rank}")
+    epoch_losses = torch.empty((0, 3), device=f"cuda:{LOCAL_RANK}")
 
     for step, x in enumerate(tqdm(dataloader)):
 
-        x = x[0].to(torch.float32)
+        x = x[0]
 
         logits, kl_all = model(x)
         reconstructions = DiscMixLogistic(logits, img_channels=3, num_bits=8).log_prob(x)
@@ -270,18 +271,15 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         # save all loss terms to rank 0
         losses = torch.stack([loss.mean(), rec_loss.mean(), final_kl.mean()], dim=0)
 
-        if not rank == 0:
-            dist.gather(tensor=losses, dst=0)
-        else:
-            batch_losses = [torch.zeros_like(losses) for _ in range(world_size)]
-            dist.gather(gather_list=batch_losses, tensor=losses)
+        # send to all devices and take mean
+        dist.all_reduce(losses, op=dist.ReduceOp.SUM)
+        losses = losses / WORLD_SIZE
 
-            # get full Batch mean losses for iteration.
-            epoch_losses, _ = pack([epoch_losses, torch.mean(torch.stack(batch_losses, dim=0), dim=0).unsqueeze(0)],
-                                   '* n')
+        # get full Batch mean losses for iteration.
+        epoch_losses, _ = pack([epoch_losses, losses], '* n')
 
     # log epoch loss
-    if rank == 0:
+    if WORLD_RANK == 0:
 
         epoch_losses = torch.mean(epoch_losses, dim=0)
         run.log(
@@ -294,14 +292,14 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         )
 
 
-def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
+def main(args: argparse.Namespace, config: dict):
 
     # init wandb logger
     log_to_wandb = bool(args.logging)
     project_name = str(args.wandb_project)
     wandb_id = args.wandb_id
 
-    if rank == 0:
+    if WORLD_RANK == 0:
         run = wandb.init(project=project_name, name=args.run_name, mode="offline" if not log_to_wandb else "online",
                          resume="must" if wandb_id is not None else None, id=wandb_id)
     else:
@@ -309,74 +307,71 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
     train_conf = config['training']
 
-    setup(rank, world_size, train_conf)
+    setup(WORLD_RANK, WORLD_SIZE, train_conf)
 
     # Get data loaders.
-    train_loader, val_loader, train_augmentations = prepare_data(rank, world_size, args.data_path, config)
+    train_loader, val_loader, train_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args.data_path, config)
 
     # create model and move it to GPU with id rank
-    model = AutoEncoder(config['autoencoder'], config['resolution']).to(rank)
+    model = AutoEncoder(config['autoencoder'], config['resolution']).to(LOCAL_RANK)
 
     # load checkpoint if resume
     if args.resume_from is not None:
 
-        if rank == 0:
+        if WORLD_RANK == 0:
             print(f'[INFO] Loading checkpoint from: {args.resume_from}')
 
-        checkpoint = torch.load(args.resume_from, map_location=f'cuda:{rank}')
+        checkpoint = torch.load(args.resume_from, map_location=f'cuda:{LOCAL_RANK}')
         model.load_state_dict(checkpoint['state_dict'])
         global_step = checkpoint['global_step']
         init_epoch = checkpoint['epoch']
 
-        if rank == 0:
+        if WORLD_RANK == 0:
             print(f'[INFO] Start from Epoch: {init_epoch} - Step: {global_step}')
 
     else:
         global_step, init_epoch = 0, 0
 
-        if rank == 0:
-            print(summary(model, torch.zeros((1,) + tuple(config['resolution']), device=f'cuda:{rank}'),
+        if WORLD_RANK == 0:
+            print(summary(model, torch.zeros((1,) + tuple(config['resolution']), device=f'cuda:{LOCAL_RANK}'),
                           show_input=False))
 
     # find final learning rate
-    base_learning_rate = float(train_conf['base_lr'])
+    learning_rate = float(train_conf['base_lr'])
     min_learning_rate = float(train_conf['min_lr'])
     weight_decay = float(train_conf['weight_decay'])
     eps = float(train_conf['eps'])
 
-    final_learning_rate = base_learning_rate #* math.sqrt(int(train_conf['cumulative_bs']) / 128)
-    final_min_learning_rate = min_learning_rate #* math.sqrt(int(train_conf['cumulative_bs']) / 128)
-
-    if rank == 0:
-        print(f'[INFO] final learning rate: {final_learning_rate}')
-        print(f'[INFO] final min learning rate: {final_min_learning_rate}')
+    if WORLD_RANK == 0:
+        print(f'[INFO] final learning rate: {learning_rate}')
+        print(f'[INFO] final min learning rate: {min_learning_rate}')
 
     # ddp model, optimizer, scheduler, scaler
-    ddp_model = DDP(model, device_ids=[rank])
+    ddp_model = DDP(model, device_ids=[LOCAL_RANK])
 
-    optimizer = torch.optim.Adamax(ddp_model.parameters(), final_learning_rate, weight_decay=weight_decay, eps=eps)
+    optimizer = torch.optim.Adamax(ddp_model.parameters(), learning_rate, weight_decay=weight_decay, eps=eps)
 
     total_training_steps = len(train_loader) * train_conf['epochs']
     if train_conf['warmup_epochs'] is not None:
         warmup_steps = int(len(train_loader) * train_conf['warmup_epochs'])
-        scheduler = LinearCosineScheduler(0, total_training_steps, final_learning_rate,
-                                          final_min_learning_rate, warmup_steps)
+        scheduler = LinearCosineScheduler(0, total_training_steps, learning_rate,
+                                          min_learning_rate, warmup_steps)
     else:
-        scheduler = CosineScheduler(0, total_training_steps, final_learning_rate, final_min_learning_rate)
+        scheduler = CosineScheduler(0, total_training_steps, learning_rate, min_learning_rate)
 
     grad_scalar = GradScaler(2 ** 10)  # scale gradient for AMP
 
     for epoch in range(init_epoch, train_conf['epochs']):
 
-        if rank == 0:
+        if WORLD_RANK == 0:
             print(f'[INFO] Epoch {epoch+1}/{train_conf["epochs"]}')
             run.log({'epoch': epoch}, step=global_step)
 
         # Training
         ddp_model.train()
-        global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, scheduler, grad_scalar,
-                                  train_conf["kl_anneal"], train_conf["spectral_regularization"],
-                                  total_training_steps, global_step, rank, world_size, run)
+        global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, scheduler,
+                                  grad_scalar, train_conf["kl_anneal"], train_conf["spectral_regularization"],
+                                  total_training_steps, global_step, run)
 
         # Validation
         dist.barrier()
@@ -384,18 +379,18 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
         if epoch % eval_freq == 0 or epoch == (train_conf["epochs"] - 1):
 
-            if rank == 0:
+            if WORLD_RANK == 0:
                 print('[INFO] Validating')
 
             ddp_model.eval()
             with torch.no_grad():
 
-                if rank == 0:
+                if WORLD_RANK == 0:
 
                     num_samples = 8
 
                     # log reconstructions
-                    x = next(iter(val_loader))[0].to(torch.float32)
+                    x = next(iter(val_loader))[0][:num_samples]
                     b, c, h, w = x.shape
 
                     logits = ddp_model.module.autoencode(x, deterministic=True)
@@ -413,10 +408,10 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
                         display = wandb.Image(make_grid(samples, nrow=num_samples))
                         run.log({f"media/samples tau={t:.2f}": display}, step=global_step)
 
-                epoch_validation(val_loader, ddp_model.module, global_step, rank, world_size, run)
+                epoch_validation(val_loader, ddp_model.module, global_step, run)
 
             # Save checkpoint (after validation)
-            if rank == 0:
+            if WORLD_RANK == 0:
                 print(f'[INFO] Saving Checkpoint')
 
                 ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/epoch={epoch:02d}.pt"
@@ -427,7 +422,7 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
             dist.barrier()
 
-    if rank == 0:
+    if WORLD_RANK == 0:
         wandb.finish()
 
         print(f'[INFO] Saving Checkpoint')
@@ -443,16 +438,48 @@ def main(rank: int, world_size: int, args: argparse.Namespace, config: dict):
 
 if __name__ == '__main__':
 
-    w_size = torch.cuda.device_count()
-    print(f'Using {w_size} gpus for training model')
+    # on multinode cluster use mpi (enables to run only from master node)
+    # on single_node local environment use torchrun
+    # for debugging do not use anything (works only on 1 gpu)
+
+    # torchrun --nproc_per_node=ngpus --nnodes=1 --node_rank=0 --master_addr='localhost'
+    # --master_port=1234 main.py --> args
+
+    # mpirun -np world_size -H ip_node_0:n_gpus,ip_node_1:n_gpus ... -x MASTER_ADDR=ip_master -x MASTER_PORT=1234
+    # -bind-to none -map-by slot -mca pml ob1 -mca btl ^openib
+    # python main.py --args
+
+    # Environment variables set by torch.distributed.launch or mpirun
+    if 'LOCAL_RANK' in os.environ:
+        # launched with torch distributed run
+        LOCAL_RANK = int(os.environ['LOCAL_RANK'])
+        WORLD_SIZE = int(os.environ['WORLD_SIZE'])
+        WORLD_RANK = int(os.environ['RANK'])
+    elif 'OMPI_COMM_WORLD_LOCAL_RANK' in os.environ:
+        # launched with ompi
+        LOCAL_RANK = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+        WORLD_SIZE = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+        WORLD_RANK = int(os.environ['OMPI_COMM_WORLD_RANK'])
+    else:
+        # launched with standard python, debugging only
+        print('[INFO] DEBUGGING MODE on single gpu!')
+        LOCAL_RANK = 0
+        WORLD_SIZE = 1
+        WORLD_RANK = 0
+
+    if LOCAL_RANK == 0:
+        print(f'[INFO] STARTING on NODE: {socket.gethostname()}')
+
+    if WORLD_RANK == 0:
+        print(f'[INFO] Total number of processes: {WORLD_SIZE}')
 
     cudnn.benchmark = True
 
     arguments = parse_args()
 
     try:
-        mp.spawn(main, args=(w_size, arguments, get_model_conf(arguments.conf_file),), nprocs=w_size)
-    except KeyboardInterrupt as k:
+        main(arguments, get_model_conf(arguments.conf_file))
+    except KeyboardInterrupt as e:
         wandb.finish()
         dist.destroy_process_group()
-        raise k
+        raise e
