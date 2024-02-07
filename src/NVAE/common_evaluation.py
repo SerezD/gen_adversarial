@@ -61,13 +61,17 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
     if IS_OURS:
 
-        conf_file = '/'.join(CKPT_NVAE.split('/')[:-1]) + '/conf.yaml'
-        config = get_model_conf(conf_file)
+        checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
+
+        if 'configuration' in checkpoint.keys():
+            config = checkpoint['configuration']
+        else:
+            conf_file = '/'.join(CKPT_NVAE.split('/')[:-1]) + '/conf.yaml'
+            config = get_model_conf(conf_file)
 
         # create model and move it to GPU with id rank
         nvae = NVAE(config['autoencoder'], config['resolution'])
 
-        checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
         nvae.load_state_dict(checkpoint['state_dict'])
         nvae.to(f'cuda:{rank}').eval()
 
@@ -94,28 +98,28 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
     with torch.no_grad():
 
-        # # TEST L2 ERROR
-        # print(f'[INFO] reconstructing...')
-        # recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
-        #
-        # for b in tqdm(range(0, data_n, batch_size)):
-        #
-        #     batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
-        #
-        #     # reconstruct cifar10 test set
-        #     if IS_OURS:
-        #         logits = nvae.autoencode(batch_x, deterministic=True)
-        #         batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
-        #     else:
-        #         logits = nvae.decode(nvae.encode_deterministic(batch_x))
-        #         decoder = nvae.decoder_output(logits)
-        #         batch_recons = decoder.mean()
-        #
-        #     recons, _ = pack([recons, batch_recons], '* c h w')
-        #
-        # # L2 error:
-        # l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
-        # print(f"L2 Error: {l2:.5f}")
+        # TEST L2 ERROR
+        print(f'[INFO] reconstructing...')
+        recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
+
+        for b in tqdm(range(0, data_n, batch_size)):
+
+            batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
+
+            # reconstruct cifar10 test set
+            if IS_OURS:
+                logits = nvae.autoencode(batch_x, deterministic=True)
+                batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
+            else:
+                logits = nvae.decode(nvae.encode_deterministic(batch_x))
+                decoder = nvae.decoder_output(logits)
+                batch_recons = decoder.mean()
+
+            recons, _ = pack([recons, batch_recons], '* c h w')
+
+        # L2 error:
+        l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
+        print(f"L2 Error: {l2:.5f}")
 
         # print(f'[INFO] adjusting batch norm...')
         # nvae.train()
@@ -217,8 +221,6 @@ if __name__ == '__main__':
     FID score: 67.3362
     IS score: 4.6309 +- 0.0779
     
-    [3SCALES_1GROUP OURS DISTRIBUTED SYNC BN]
-    L2 Error: 0.61473
     """
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
@@ -226,7 +228,7 @@ if __name__ == '__main__':
     IS_OURS = True
 
     if IS_OURS:
-        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/run_2.pt'
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/large_latents.pt'
     else:
         CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/last_hope.pt'
 

@@ -17,6 +17,7 @@ dependencies:
   - libjpeg-turbo>=2.1.4
   - opencv
   - numba==0.56.2  # solves import error!
+  - ninja
   - pip
   - pip:
       - ffcv

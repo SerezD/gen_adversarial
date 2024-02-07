@@ -10,7 +10,8 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.datasets import CoupledDataset
-from src.NVAE.original.model import AutoEncoder
+from src.NVAE.mine.distributions import DiscMixLogistic
+from src.NVAE.mine.model import AutoEncoder
 from src.NVAE.original.utils import get_arch_cells
 
 
@@ -26,20 +27,31 @@ def get_model_conf(filepath: str):
 
 def main():
 
-    # create model and move it to GPU with id rank
-    # load nvae pretrained cifar10
+    # # create model and move it to GPU with id rank
+    # # load nvae pretrained cifar10
+    # checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
+    #
+    # # get and update args
+    # args = checkpoint['args']
+    # args.num_mixture_dec = 10
+    # args.batch_size = 100
+    #
+    # # init model and load
+    # arch_instance = get_arch_cells(args.arch_instance)
+    # nvae = AutoEncoder(args, arch_instance)
+    # nvae.load_state_dict(checkpoint['state_dict'], strict=False)
+    # nvae = nvae.cuda().eval()
+
     checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
 
-    # get and update args
-    args = checkpoint['args']
-    args.num_mixture_dec = 10
-    args.batch_size = 100
+    config = checkpoint['configuration']
 
-    # init model and load
-    arch_instance = get_arch_cells(args.arch_instance)
-    nvae = AutoEncoder(args, arch_instance)
-    nvae.load_state_dict(checkpoint['state_dict'], strict=False)
-    nvae = nvae.cuda().eval()
+    # create model and move it to GPU with id rank
+    nvae = AutoEncoder(config['autoencoder'], config['resolution'])
+
+    nvae.load_state_dict(checkpoint['state_dict'])
+    nvae.cuda().eval()
+
 
     # load dataset
     dataloader = DataLoader(CoupledDataset(folder=DATA_PATH, image_size=32), batch_size=128, shuffle=False)
@@ -65,21 +77,19 @@ def main():
             # first images and labels, to_interpolate
             x1, y1, x2, y2 = [i.cuda() for i in batch]
 
-            # reconstruct cifar10 test set
-            logits = nvae.decode(nvae.encode_deterministic(x1))
-            x1_recons = nvae.decoder_output(logits).mean()
+            # TODO
+            # # reconstruct cifar10 test set
+            # logits = nvae.decode(nvae.encode_deterministic(x1))
+            # x1_recons = nvae.decoder_output(logits).mean()
+            #
+            # logits = nvae.decode(nvae.encode_deterministic(x2))
+            # x2_recons = nvae.decoder_output(logits).mean()
 
-            logits = nvae.decode(nvae.encode_deterministic(x2))
-            x2_recons = nvae.decoder_output(logits).mean()
+            logits = nvae.decode(nvae.encode(x1, deterministic=True))
+            x1_recons = DiscMixLogistic(logits).mean()
 
-            # TODO plot (for supplementary ?)
-            # if b == 0:
-            #     imgs = rearrange(torch.stack([batch_x, batch_recons], dim=0), 'n b c h w -> (b n) c h w')
-            #     imgs = make_grid(imgs, nrow=20).permute(1, 2, 0).cpu().numpy()
-            #     plt.imshow(imgs)
-            #     plt.axis(False)
-            #     plt.title('Reconstructions (CIFAR 10 Test set)')
-            # plt.show()
+            logits = nvae.decode(nvae.encode(x2, deterministic=True))
+            x2_recons = DiscMixLogistic(logits).mean()
 
             # measure accuracy and keep only valid samples.
             x1_recons = normalize(x1_recons,
@@ -105,17 +115,24 @@ def main():
             n_valid = y1.shape[0]
 
             # interpolate at different alpha terms and check when class is changing
-            chunks_x1 = nvae.encode_deterministic(x1)
-            chunks_x2 = nvae.encode_deterministic(x2)
+            # TODO
+            # chunks_x1 = nvae.encode_deterministic(x1)
+            # chunks_x2 = nvae.encode_deterministic(x2)
+
+            chunks_x1 = nvae.encode(x1, deterministic=True)
+            chunks_x2 = nvae.encode(x2, deterministic=True)
 
             alpha_res = torch.empty((0, 3), device='cuda')
 
             for i, a in enumerate(alpha):
 
+                # TODO CHANGE THIS
                 if chunk_to_test == 0:
                     int_chunks = [(1 - a) * chunks_x1[0] + a * chunks_x2[0]] + chunks_x1[1:]
                 elif chunk_to_test == 1:
                     int_chunks = [chunks_x1[0]] + [(1 - a) * chunks_x1[1] + a * chunks_x2[1]] + [chunks_x1[-1]]
+                    # WITH 2 chunks
+                    # int_chunks = [chunks_x1[0]] + [(1 - a) * chunks_x1[1] + a * chunks_x2[1]]
                 elif chunk_to_test == 2:
                     int_chunks = chunks_x1[:-1] + [(1 - a) * chunks_x1[-1] + a * chunks_x2[-1]]
                 else:
@@ -123,7 +140,8 @@ def main():
                     int_chunks = [(1 - a) * c_x1 + a * c_x2 for c_x1, c_x2 in zip(chunks_x1, chunks_x2)]
 
                 logits = nvae.decode(int_chunks)
-                recons = nvae.decoder_output(logits).mean()
+                # recons = nvae.decoder_output(logits).mean() TODO
+                recons = DiscMixLogistic(logits).mean()
 
                 if batch_idx == 0:
                     example_images = torch.cat((example_images, recons[0].unsqueeze(0)), dim=0)
@@ -144,6 +162,7 @@ def main():
 
             if batch_idx == 0:
                 example_images = torch.cat((example_images, x2[0].unsqueeze(0)), dim=0)
+
         print(f"CHUNK {chunk_to_test}")
         final_res = torch.mean(res, dim=0).cpu().numpy()
         for a, r in zip(alpha, final_res):
@@ -160,7 +179,17 @@ if __name__ == '__main__':
     DATA_PATH = '/media/dserez/datasets/cifar10/validation/'
     TORCH_HOME = '/media/dserez/runs/adversarial/CNNs/'
     cnn_type = 'vgg'  # 'vgg' 'resnet'
-    chunk_to_test = 'all'
 
-    CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/best/3scales_1group_latest.pt'
-    main()
+    # CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/best/3scales_1group_latest.pt'
+    CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/large_latents.pt'
+
+    # VGG with medium 1 !
+    # ALL   0.981 0.943 0.839 0.585 0.232 0.072 0.014 0.000 0.000
+    # 0     0.993 0.986 0.975 0.960 0.938 0.911 0.880 0.846 0.806
+    # 1     0.990 0.979 0.966 0.944 0.915 0.877 0.832 0.775 0.717
+    # 2     0.987 0.973 0.949 0.914 0.864 0.794 0.708 0.625 0.555
+
+    for chunk_to_test in (0, 1, 2, 'all'):
+        print('#' * 20)
+        print(f'chunk = {chunk_to_test}')
+        main()

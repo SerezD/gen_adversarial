@@ -257,7 +257,7 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
 
     for step, x in enumerate(tqdm(dataloader)):
 
-        x = x[0]
+        x = x[0].to(torch.float32)
 
         logits, kl_all = model(x)
         reconstructions = DiscMixLogistic(logits, img_channels=3, num_bits=8).log_prob(x)
@@ -390,7 +390,7 @@ def main(args: argparse.Namespace, config: dict):
                     num_samples = 8
 
                     # log reconstructions
-                    x = next(iter(val_loader))[0][:num_samples]
+                    x = next(iter(val_loader))[0][:num_samples].to(torch.float32)
                     b, c, h, w = x.shape
 
                     logits = ddp_model.module.autoencode(x, deterministic=True)

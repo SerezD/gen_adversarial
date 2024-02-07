@@ -69,7 +69,10 @@ class CoupledDataset(Dataset):
         self.samples = sorted(list(pathlib.Path(folder).rglob('*.png')) + list(pathlib.Path(folder).rglob('*.jpg')) +
                               list(pathlib.Path(folder).rglob('*.bmp')) + list(pathlib.Path(folder).rglob('*.JPEG')))
         self.samples = [i.absolute().as_posix() for i in self.samples]
-        self.img_labels = torch.tensor([int(i.split('/')[-2]) for i in self.samples])
+
+        labels_as_str = [i.split('/')[-2] for i in self.samples]
+        class_names = sorted(list(set(labels_as_str)))
+        self.img_labels = torch.tensor([class_names.index(s) for s in labels_as_str])
 
         self.transforms = Compose([ToTensor(), Resize((image_size, image_size), antialias=True)])
         self.seed = seed
@@ -83,7 +86,7 @@ class CoupledDataset(Dataset):
         src_y = self.img_labels[idx]
 
         cand_trg = torch.nonzero(torch.not_equal(self.img_labels, torch.ones_like(self.img_labels) * src_y)).squeeze(1)
-        trg_idx = cand_trg[torch.randint(len(cand_trg), (1,), generator=torch.Generator().manual_seed(self.seed)).item()]
+        trg_idx = cand_trg[torch.randint(len(cand_trg), (1,), generator=torch.Generator().manual_seed(idx)).item()]
 
         trg_x = self.transforms(Image.open(self.samples[trg_idx]).convert('RGB'))
         trg_y = self.img_labels[trg_idx]
@@ -92,5 +95,7 @@ class CoupledDataset(Dataset):
 
 
 # if __name__ == '__main__':
-#     d = CoupledDataset(folder='/media/dserez/datasets/cifar10', image_size=32)
-#     d.__getitem__(30)
+    # d = CoupledDataset(folder='/media/dserez/datasets/afhq/wild/validation/', image_size=256)
+    # _, _, x1, _ = d.__getitem__(30)
+    # _, _, x2, _ = d.__getitem__(29)
+    # print((x1 - x2).view(-1).sum())
