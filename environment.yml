@@ -26,3 +26,4 @@ dependencies:
       - pytorch-model-summary
       - wandb
       - torch-fidelity
+      - foolbox  # adversarial attacks

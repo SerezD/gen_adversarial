@@ -13,6 +13,7 @@ from data.datasets import CoupledDataset
 from src.NVAE.mine.distributions import DiscMixLogistic
 from src.NVAE.mine.model import AutoEncoder
 from src.NVAE.original.utils import get_arch_cells
+from src.final_experiments.common_utils import load_NVAE, load_hub_CNN
 
 
 def get_model_conf(filepath: str):
@@ -27,6 +28,7 @@ def get_model_conf(filepath: str):
 
 def main():
 
+    # TODO decide if it is worth keeping the code for original NVAE, or if we use only the new one.
     # # create model and move it to GPU with id rank
     # # load nvae pretrained cifar10
     # checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
@@ -42,29 +44,13 @@ def main():
     # nvae.load_state_dict(checkpoint['state_dict'], strict=False)
     # nvae = nvae.cuda().eval()
 
-    checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
-
-    config = checkpoint['configuration']
-
-    # create model and move it to GPU with id rank
-    nvae = AutoEncoder(config['autoencoder'], config['resolution'])
-
-    nvae.load_state_dict(checkpoint['state_dict'])
-    nvae.cuda().eval()
-
+    nvae = load_NVAE(CKPT_NVAE, 'cuda')
 
     # load dataset
     dataloader = DataLoader(CoupledDataset(folder=DATA_PATH, image_size=32), batch_size=128, shuffle=False)
 
     # load classifiers pretrained cifar10
-    os.environ["TORCH_HOME"] = TORCH_HOME
-
-    if cnn_type == 'resnet':
-        cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet32", pretrained=True)
-        cnn = cnn.cuda().eval()
-    else:
-        cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_vgg16_bn", pretrained=True)
-        cnn = cnn.cuda().eval()
+    cnn = load_hub_CNN(TORCH_HOME, cnn_type, 'cuda')
 
     alpha = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     res = torch.empty((0, len(alpha), 3),device='cuda')
@@ -178,7 +164,7 @@ if __name__ == '__main__':
 
     DATA_PATH = '/media/dserez/datasets/cifar10/validation/'
     TORCH_HOME = '/media/dserez/runs/adversarial/CNNs/'
-    cnn_type = 'vgg'  # 'vgg' 'resnet'
+    cnn_type = 'resnet32'  # 'vgg16' 'resnet32'
 
     # CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/best/3scales_1group_latest.pt'
     CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/large_latents.pt'

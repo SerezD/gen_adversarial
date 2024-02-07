@@ -556,13 +556,14 @@ class AutoEncoder(nn.Module):
 
         return logits
 
-    def encode(self, gt_images: torch.Tensor, deterministic: bool = False):
+    def encode(self, gt_images: torch.Tensor, deterministic: bool = False, with_std: bool = False):
         """
         :param gt_images: images in 0__1 range
         :return:
         """
 
         chunks = []
+        std_devs = []
 
         b = gt_images.shape[0]
 
@@ -604,6 +605,7 @@ class AutoEncoder(nn.Module):
             z_0 = self.nf_cells.get_submodule('nf_0:0')(z_0)
 
         chunks.append(z_0)
+        std_devs.append(log_sig_q.exp())
 
         # decoding phase
 
@@ -647,6 +649,7 @@ class AutoEncoder(nn.Module):
                         z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
 
                     chunks.append(z_i)
+                    std_devs.append((log_sig_p + log_sig_q).exp())
 
                     # combine x and z_i
                     x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
@@ -654,6 +657,9 @@ class AutoEncoder(nn.Module):
             # upsampling at the end of each scale
             if s < self.num_scales - 1:
                 x = scale.get_submodule('upsampling')(x)
+
+        if with_std:
+            return chunks, std_devs
 
         return chunks
 
