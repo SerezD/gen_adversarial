@@ -1,7 +1,11 @@
 import os
+from argparse import Namespace
+
 import torch
 
 from src.NVAE.mine.model import AutoEncoder
+from src.StyleGan.models.hyperstyle import HyperStyle
+from src.classifier.model import ResNet
 
 
 def load_NVAE(checkpoint_path: str, device: str):
@@ -33,9 +37,9 @@ def load_hub_CNN(model_path: str, type: str, device: str):
 
     os.environ["TORCH_HOME"] = model_path
 
-    if type == 'resnet32':
+    if type == 'resnet32' or type == 'resnet-32':
         cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet32", pretrained=True)
-    elif type == 'vgg16':
+    elif type == 'vgg16' or type == 'vgg-16':
         cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_vgg16_bn", pretrained=True)
     else:
         raise ValueError(f"parameter type = {type} not recognized.")
@@ -44,9 +48,25 @@ def load_hub_CNN(model_path: str, type: str, device: str):
     return cnn
 
 
-def load_StyleGan():
-    pass
+def load_StyleGan(encoder_path: str, decoder_path: str, device: str):
+
+    ckpt = torch.load(decoder_path, map_location='cpu')
+
+    opts = ckpt['opts']
+    opts['checkpoint_path'] = decoder_path
+    opts['load_w_encoder'] = True
+    opts['w_encoder_checkpoint_path'] = encoder_path
+    opts = Namespace(**opts)
+
+    autoencoder = HyperStyle(opts)
+    autoencoder.to(device).eval()
+    return autoencoder
 
 
-def load_ResNet_AFHQ_Wild():
-    pass
+def load_ResNet_AFHQ_Wild(path: str, device: str):
+
+    ckpt = torch.load(path, map_location='cpu')
+    resnet = ResNet()
+    resnet.load_state_dict(ckpt['state_dict'])
+    resnet.to(device).eval()
+    return resnet

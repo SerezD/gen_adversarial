@@ -15,6 +15,7 @@ from tqdm import tqdm
 from data.datasets import CoupledDataset
 from src.StyleGan.models.hyperstyle import HyperStyle
 from src.classifier.model import ResNet
+from src.final_experiments.common_utils import load_ResNet_AFHQ_Wild, load_StyleGan
 
 
 def parse_args():
@@ -66,22 +67,10 @@ def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: s
          pickle_dir: str, plots_dir: str, batch_size: int, device: str = 'cuda:0'):
 
     # Load resnet
-    ckpt = torch.load(resnet_50_path, map_location='cpu')
-    resnet = ResNet()
-    resnet.load_state_dict(ckpt['state_dict'])
-    resnet.to(device).eval()
+    resnet = load_ResNet_AFHQ_Wild(resnet_50_path, device)
 
     # Load StyleNetWork
-    ckpt = torch.load(decoder_path, map_location='cpu')
-
-    opts = ckpt['opts']
-    opts['checkpoint_path'] = decoder_path
-    opts['load_w_encoder'] = True
-    opts['w_encoder_checkpoint_path'] = encoder_path
-    opts = Namespace(**opts)
-
-    autoencoder = HyperStyle(opts)
-    autoencoder.to(device).eval()
+    autoencoder = load_StyleGan(encoder_path, decoder_path, device)
 
     # load dataset
     dataloader = DataLoader(CoupledDataset(folder=data_path, image_size=256,
@@ -146,12 +135,12 @@ def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: s
                 # get recons
                 if n == 'all':
                     recons = autoencoder.decode(interpolated_codes[:, i], weights_deltas, resize=True)
-                    recons = (recons + 1) / 2
                 else:
                     initial_codes = interpolated_codes[:, 0].clone()  # alpha 0 == no_interpolation
                     initial_codes[:, n] = interpolated_codes[:, i, n].clone()
                     recons = autoencoder.decode(initial_codes, weights_deltas, resize=True)
-                    recons = (recons + 1) / 2
+
+                recons = torch.clip((recons + 1) / 2, 0.0, 1.0)
 
                 # get preds
                 preds = torch.argmax(resnet(recons), dim=1)

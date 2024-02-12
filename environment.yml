@@ -8,6 +8,8 @@ dependencies:
   - torchvision
   - torchaudio
   - pytorch-cuda==12.1
+  - cudatoolkit-dev
+  - ninja
   - torchmetrics
   - einops
   - kornia
@@ -17,8 +19,6 @@ dependencies:
   - libjpeg-turbo>=2.1.4
   - opencv
   - numba==0.56.2  # solves import error!
-  - ninja
-  - cudatoolkit-dev
   - pip
   - pip:
       - ffcv
