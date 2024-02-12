@@ -18,6 +18,7 @@ dependencies:
   - opencv
   - numba==0.56.2  # solves import error!
   - ninja
+  - cudatoolkit-dev
   - pip
   - pip:
       - ffcv

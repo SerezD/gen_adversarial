@@ -1,181 +1,165 @@
-import torch
-from einops import pack
-from matplotlib import pyplot as plt
-from torch.utils.data import DataLoader
+import argparse
+from einops import rearrange
 from kornia.enhance import normalize
-
+from matplotlib import pyplot as plt
+import numpy as np
 import os
-
+import pickle
+import torch
+from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.datasets import CoupledDataset
 from src.NVAE.mine.distributions import DiscMixLogistic
-from src.NVAE.mine.model import AutoEncoder
-from src.NVAE.original.utils import get_arch_cells
 from src.final_experiments.common_utils import load_NVAE, load_hub_CNN
 
 
-def get_model_conf(filepath: str):
-    import yaml
+def parse_args():
 
-    # load params
-    with open(filepath, 'r', encoding='utf-8') as stream:
-        params = yaml.safe_load(stream)
+    parser = argparse.ArgumentParser('Test top-1 accuracy of CNNs when interpolating images on NVAE chunks')
 
-    return params
+    # TODO for public release, replace "default=..." with "required=True"
+
+    parser.add_argument('--data_path', type=str, default='/media/dserez/datasets/cifar10/validation/',
+                        help='directory of validation set')
+
+    parser.add_argument('--batch_size', type=int, default=8)
+
+    parser.add_argument('--cnn_type', type=str, required=True, choices=['resnet32', 'vgg16'])
+
+    parser.add_argument('--cnn_path', type=str, default='/media/dserez/runs/adversarial/CNNs/',
+                        help='directory of validation set')
+
+    parser.add_argument('--nvae_path', type=str, required=True,
+                        help='checkpoint file for NVAE, containing state dict and configuration information')
+
+    parser.add_argument('--name', type=str, default='test',
+                        help='name of experiments for saving results')
+
+    parser.add_argument('--visual_examples_saving_folder', type=str, default='../plots/',
+                        help='where to save visual examples of the reconstructed interpolations')
+
+    parser.add_argument('--pickle_file_saving_folder', type=str, default='../results/',
+                        help='where to save pickle file with the accuracies')
+
+    args = parser.parse_args()
+
+    # create dirs if not existing
+    if not os.path.exists(f'{args.visual_examples_saving_folder}/{args.name}'):
+        os.makedirs(f'{args.visual_examples_saving_folder}/{args.name}')
+
+    if not os.path.exists(f'{args.pickle_file_saving_folder}/{args.name}'):
+        os.makedirs(f'{args.pickle_file_saving_folder}/{args.name}')
+
+    return args
 
 
-def main():
+@torch.no_grad()
+def main(data_path: str, batch_size: int, cnn_type: str, cnn_path: str, nvae_path: str,
+         plots_dir: str, pickle_dir: str):
 
-    # TODO decide if it is worth keeping the code for original NVAE, or if we use only the new one.
-    # # create model and move it to GPU with id rank
-    # # load nvae pretrained cifar10
-    # checkpoint = torch.load(CKPT_NVAE, map_location='cpu')
-    #
-    # # get and update args
-    # args = checkpoint['args']
-    # args.num_mixture_dec = 10
-    # args.batch_size = 100
-    #
-    # # init model and load
-    # arch_instance = get_arch_cells(args.arch_instance)
-    # nvae = AutoEncoder(args, arch_instance)
-    # nvae.load_state_dict(checkpoint['state_dict'], strict=False)
-    # nvae = nvae.cuda().eval()
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-    nvae = load_NVAE(CKPT_NVAE, 'cuda')
+    # this is used for loading validation in consistent order, allowing nice plots.
+    random_seed = 0
+    torch.manual_seed(random_seed)
 
     # load dataset
-    dataloader = DataLoader(CoupledDataset(folder=DATA_PATH, image_size=32), batch_size=128, shuffle=False)
+    dataloader = DataLoader(CoupledDataset(folder=data_path, image_size=32, seed=random_seed),
+                            batch_size=batch_size, shuffle=False)
 
-    # load classifiers pretrained cifar10
-    cnn = load_hub_CNN(TORCH_HOME, cnn_type, 'cuda')
+    # load pretrained NVAE
+    nvae = load_NVAE(nvae_path, device)
+    n_latents = sum(nvae.groups_per_scale)
 
-    alpha = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-    res = torch.empty((0, len(alpha), 3),device='cuda')
-    example_images = torch.empty((0, 3, 32, 32), device='cuda')  # alpha_n, 3, 32, 32
+    # load pretrained classifier
+    cnn = load_hub_CNN(cnn_path, cnn_type, device)
 
-    with torch.no_grad():
+    latents_to_test = ['all'] + np.arange(n_latents).tolist()
+    alphas = np.arange(0, 1.1, 0.1)
 
-        for batch_idx, batch in enumerate(tqdm(dataloader)):
+    # dict for saving
+    dict_accuracies = {}  # will be {latent_i : {alpha_0.0: accuracy, ...} , ... }
 
-            # first images and labels, to_interpolate
-            x1, y1, x2, y2 = [i.cuda() for i in batch]
+    n_samples = 10
+    example_images = torch.zeros((n_samples, len(latents_to_test), len(alphas), 3, 32, 32), device='cpu')
 
-            # TODO
-            # # reconstruct cifar10 test set
-            # logits = nvae.decode(nvae.encode_deterministic(x1))
-            # x1_recons = nvae.decoder_output(logits).mean()
-            #
-            # logits = nvae.decode(nvae.encode_deterministic(x2))
-            # x2_recons = nvae.decoder_output(logits).mean()
+    print('[INFO] Starting Computation on each latent...')
 
-            logits = nvae.decode(nvae.encode(x1, deterministic=True))
-            x1_recons = DiscMixLogistic(logits).mean()
+    for latent_idx, latent in enumerate(tqdm(latents_to_test)):
 
-            logits = nvae.decode(nvae.encode(x2, deterministic=True))
-            x2_recons = DiscMixLogistic(logits).mean()
+        for alpha_idx, a in enumerate(alphas):
 
-            # measure accuracy and keep only valid samples.
-            x1_recons = normalize(x1_recons,
-                               mean=torch.tensor([0.507, 0.4865, 0.4409], device='cuda:0'),
-                               std=torch.tensor([0.2673, 0.2564, 0.2761], device='cuda:0'))
+            all_preds = torch.empty(0, device=device)
+            all_labels = torch.empty(0, device=device)
 
-            x2_recons = normalize(x2_recons,
-                               mean=torch.tensor([0.507, 0.4865, 0.4409], device='cuda:0'),
-                               std=torch.tensor([0.2673, 0.2564, 0.2761], device='cuda:0'))
+            for batch_idx, batch in enumerate(dataloader):
 
-            x1_preds = torch.argmax(cnn(x1_recons), dim=1)
-            x2_preds = torch.argmax(cnn(x2_recons), dim=1)
+                # first images and labels, to_interpolate
+                x1, y1, x2, _ = [i.to(device) for i in batch]
 
-            valid_samples = torch.logical_and(
-                torch.eq(x1_preds, y1),
-                torch.eq(x2_preds, y2)
-            )
+                # encode
+                chunks_x1 = nvae.encode(x1, deterministic=True)
+                chunks_x2 = nvae.encode(x2, deterministic=True)
 
-            x1 = x1[valid_samples]
-            y1 = y1[valid_samples]
-            x2 = x2[valid_samples]
-            y2 = y2[valid_samples]
-            n_valid = y1.shape[0]
-
-            # interpolate at different alpha terms and check when class is changing
-            # TODO
-            # chunks_x1 = nvae.encode_deterministic(x1)
-            # chunks_x2 = nvae.encode_deterministic(x2)
-
-            chunks_x1 = nvae.encode(x1, deterministic=True)
-            chunks_x2 = nvae.encode(x2, deterministic=True)
-
-            alpha_res = torch.empty((0, 3), device='cuda')
-
-            for i, a in enumerate(alpha):
-
-                # TODO CHANGE THIS
-                if chunk_to_test == 0:
-                    int_chunks = [(1 - a) * chunks_x1[0] + a * chunks_x2[0]] + chunks_x1[1:]
-                elif chunk_to_test == 1:
-                    int_chunks = [chunks_x1[0]] + [(1 - a) * chunks_x1[1] + a * chunks_x2[1]] + [chunks_x1[-1]]
-                    # WITH 2 chunks
-                    # int_chunks = [chunks_x1[0]] + [(1 - a) * chunks_x1[1] + a * chunks_x2[1]]
-                elif chunk_to_test == 2:
-                    int_chunks = chunks_x1[:-1] + [(1 - a) * chunks_x1[-1] + a * chunks_x2[-1]]
+                # interpolate latent i at alpha
+                if latent == 'all':
+                    interpolated_chunks = [(1 - a) * c1 + a * c2 for (c1, c2) in zip(chunks_x1, chunks_x2)]
                 else:
-                    # interpolate all
-                    int_chunks = [(1 - a) * c_x1 + a * c_x2 for c_x1, c_x2 in zip(chunks_x1, chunks_x2)]
+                    interpolated_chunks = chunks_x1.copy()
+                    interpolated_chunks[latent] = (1 - a) * interpolated_chunks[latent] + a * chunks_x2[latent]
 
-                logits = nvae.decode(int_chunks)
-                # recons = nvae.decoder_output(logits).mean() TODO
+                # decode batch
+                logits = nvae.decode(interpolated_chunks)
                 recons = DiscMixLogistic(logits).mean()
 
-                if batch_idx == 0:
-                    example_images = torch.cat((example_images, recons[0].unsqueeze(0)), dim=0)
+                # save image for later
+                if batch_idx < n_samples:
+                    example_images[batch_idx, latent_idx, alpha_idx] = recons[0].cpu()
 
+                # get prediction
                 recons = normalize(recons,
-                                   mean=torch.tensor([0.507, 0.4865, 0.4409], device='cuda:0'),
-                                   std=torch.tensor([0.2673, 0.2564, 0.2761], device='cuda:0'))
+                                   mean=torch.tensor([0.507, 0.4865, 0.4409], device=device),
+                                   std=torch.tensor([0.2673, 0.2564, 0.2761], device=device))
                 preds = torch.argmax(cnn(recons), dim=1)
-                this_res = torch.stack(
-                    [
-                        (preds == y1).sum() / n_valid,
-                        (preds == y2).sum() / n_valid,
-                        (torch.logical_and(preds != y1, preds != y2)).sum() / n_valid
-                ], dim=0).view(1, 3)
-                alpha_res, _ = pack([alpha_res, this_res], '* d')
 
-            res, _ = pack([res, alpha_res.unsqueeze(0)], '* a d')
+                # save preds, targets of batch
+                all_preds = torch.cat((all_preds, preds))
+                all_labels = torch.cat((all_labels, y1))
 
-            if batch_idx == 0:
-                example_images = torch.cat((example_images, x2[0].unsqueeze(0)), dim=0)
+            # save to final dict
+            accuracy = (all_preds == all_labels).to(torch.float32).mean()
 
-        print(f"CHUNK {chunk_to_test}")
-        final_res = torch.mean(res, dim=0).cpu().numpy()
-        for a, r in zip(alpha, final_res):
-            print(f"alpha = {a}, src_class, adv_class, None = {r}")
+            if str(latent) not in dict_accuracies.keys():
+                dict_accuracies[str(latent)] = {str(a) : accuracy}
+            else:
+                dict_accuracies[str(latent)][str(a)] = accuracy
 
-        numpy_img = make_grid(example_images, nrow=10).permute(1, 2, 0).cpu().numpy()
-        plt.imshow(numpy_img)
+    # save image
+    for i, sample in enumerate(example_images):
+
+        display = make_grid(rearrange(sample, 'l a c h w -> (l a) c h w'), nrow=len(alphas))
+        display = rearrange(display, 'c h w -> h w c').numpy()
+        plt.imshow(display)
         plt.axis(False)
-        plt.show()
+        plt.savefig(f'{plots_dir}/chunks_interpolation_sample_{i}.png')
+        plt.close()
+
+    # save pickle
+    with open(f'{pickle_dir}/class_change_accuracies.pickle', 'wb') as f:
+        pickle.dump(dict_accuracies, f)
 
 
 if __name__ == '__main__':
 
-    DATA_PATH = '/media/dserez/datasets/cifar10/validation/'
-    TORCH_HOME = '/media/dserez/runs/adversarial/CNNs/'
-    cnn_type = 'resnet32'  # 'vgg16' 'resnet32'
+    arguments = parse_args()
 
-    # CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/best/3scales_1group_latest.pt'
-    CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/replica/large_latents.pt'
-
-    # VGG with medium 1 !
-    # ALL   0.981 0.943 0.839 0.585 0.232 0.072 0.014 0.000 0.000
-    # 0     0.993 0.986 0.975 0.960 0.938 0.911 0.880 0.846 0.806
-    # 1     0.990 0.979 0.966 0.944 0.915 0.877 0.832 0.775 0.717
-    # 2     0.987 0.973 0.949 0.914 0.864 0.794 0.708 0.625 0.555
-
-    for chunk_to_test in (0, 1, 2, 'all'):
-        print('#' * 20)
-        print(f'chunk = {chunk_to_test}')
-        main()
+    main(data_path=arguments.data_path,
+         batch_size=arguments.batch_size,
+         cnn_type=arguments.cnn_type,
+         cnn_path=arguments.cnn_path,
+         nvae_path=arguments.nvae_path,
+         plots_dir=f'{arguments.visual_examples_saving_folder}/{arguments.name}',
+         pickle_dir=f'{arguments.pickle_file_saving_folder}/{arguments.name}',
+         )
