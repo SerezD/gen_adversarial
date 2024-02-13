@@ -132,7 +132,7 @@ def main(data_path: str, batch_size: int, cnn_type: str, cnn_path: str, nvae_pat
             accuracy = (all_preds == all_labels).to(torch.float32).mean()
 
             if str(latent) not in dict_accuracies.keys():
-                dict_accuracies[str(latent)] = {str(a) : accuracy}
+                dict_accuracies[str(latent)] = {str(a): accuracy}
             else:
                 dict_accuracies[str(latent)][str(a)] = accuracy
 

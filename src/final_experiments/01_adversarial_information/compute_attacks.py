@@ -4,6 +4,7 @@ import pickle
 
 import foolbox as fb
 import eagerpy as ep
+import kornia.enhance
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -48,16 +49,18 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
 
     # load correct cnn
     if attacked_net_type == 'resnet-50':
-        attacked_model = load_ResNet_AFHQ_Wild(attacked_net_path, device)
+        base_net = load_ResNet_AFHQ_Wild(attacked_net_path, device)
         preprocessing = dict(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], axis=-3)
+        normalize = kornia.enhance.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         image_size = 256
 
     else:
-        attacked_model = load_hub_CNN(attacked_net_path, attacked_net_type, device)
+        base_net = load_hub_CNN(attacked_net_path, attacked_net_type, device)
         preprocessing = dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], axis=-3)
+        normalize = kornia.enhance.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         image_size = 32
 
-    attacked_model = fb.PyTorchModel(attacked_model, bounds=(0, 1), preprocessing=preprocessing, device=device)
+    attacked_model = fb.PyTorchModel(base_net, bounds=(0, 1), preprocessing=preprocessing, device=device)
 
     # dataloader
     dataloader = DataLoader(ImageLabelDataset(folder=images_path, image_size=image_size),
@@ -78,9 +81,10 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
         bounds = (1/255, 2/255, 4/255, 8/255, 16/255)
     else:
         # blackbox
-        attacks = [fb.attacks.BoundaryAttack(), fb.attacks.HopSkipJumpAttack()]
+        attacks = [fb.attacks.BoundaryAttack(steps=4096),
+                   fb.attacks.HopSkipJumpAttack(max_gradient_eval_steps=1024)]
         attack_names = ['Boundary_L2', 'HSJA_L2']
-        bounds = (0.1, 0.3, 0.5, 0.7, 0.9)
+        bounds = (0.5, 0.75, 1.0, 1.25, 1.5)
 
     # create a unique dict to save results
     save_dict = {}
@@ -100,11 +104,36 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
         # foolbox wants ep tensors for working faster
         images, labels = ep.astensors(*(images.to(device), labels.to(device)))
 
+        if attack_type == 'blackbox':
+
+            with torch.no_grad():
+
+                # find starting points (random noise) (same for all attacks)
+                starting_points = torch.zeros_like(images.raw)
+                found_adv = torch.zeros_like(labels.raw)
+
+                while True:
+
+                    random_noise = torch.zeros_like(images.raw).uniform_(-1.0, 1.0)
+                    random_adv = torch.clip(images.raw + random_noise, 0., 1.)
+                    preds = torch.argmax(base_net(normalize(random_adv)), dim=1)
+                    is_adv = preds.ne(labels.raw)
+                    starting_points[is_adv] = random_adv[is_adv]
+                    found_adv[is_adv] = 1.
+
+                    if found_adv.sum().item() == found_adv.shape[0]:
+                        break
+                starting_points = ep.astensor(starting_points)
+
+        else:
+            starting_points = None  # NOT USED
+
         for (name, attack) in zip(attack_names, attacks):
 
             if attack_type == 'blackbox':
                 with torch.no_grad():
-                    _, adv, success = attack(attacked_model, images, labels, epsilons=bounds)
+                    _, adv, success = attack(attacked_model, images, labels, starting_points=starting_points,
+                                             epsilons=bounds)
             else:
                 _, adv, success = attack(attacked_model, images, labels, epsilons=bounds)
 

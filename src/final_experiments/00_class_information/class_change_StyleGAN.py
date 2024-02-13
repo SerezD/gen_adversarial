@@ -41,6 +41,9 @@ def parse_args():
                         default='/media/dserez/runs/stylegan2/inversions/encoder_afhq_wild.pt',
                         help='checkpoint file for Encoder Network')
 
+    parser.add_argument('--use_hyperstyle',  action='store_true',
+                        default=False, help='when true, use hyperstyle autoencoding, else basic E4E')
+
     parser.add_argument('--name', type=str, default='test',
                         help='name of experiments for saving results')
 
@@ -63,7 +66,7 @@ def parse_args():
 
 
 @torch.no_grad()
-def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: str,
+def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: str, use_hyperstyle: bool,
          pickle_dir: str, plots_dir: str, batch_size: int, device: str = 'cuda:0'):
 
     # Load resnet
@@ -81,15 +84,15 @@ def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: s
     alphas = torch.tensor([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0], device=device)
     latents_to_test = ('all', 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 
-    n_samples = 2
+    n_samples = 10
     example_images = torch.zeros((n_samples, len(latents_to_test), len(alphas), 3, 256, 256), device='cpu')
 
     print('[INFO] Starting Computation on each batch...')
 
     for batch_idx, batch in enumerate(tqdm(dataloader)):
 
-        if batch_idx == 2:
-            break
+        # if batch_idx == 2:
+        #     break
 
         # first images and labels, to_interpolate
         x1, y1, x2, y2 = [i.to(device) for i in batch]
@@ -101,22 +104,29 @@ def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: s
                       torch.tensor([0.5, 0.5, 0.5], device=device),
                       torch.tensor([0.5, 0.5, 0.5], device=device))
 
-        # get reconstructions, adjusted_weights, codes
-        inputs = x.clone()
-        recons, latent, weights_deltas, codes = None, None, None, None
+        if use_hyperstyle:
 
-        for _ in range(4):
+            # get reconstructions, adjusted_weights, codes
+            inputs = x.clone()
+            recons, latent, weights_deltas, codes = None, None, None, None
 
-            recons, latent, weights_deltas, codes, _ = autoencoder.forward(inputs,
-                                                                           randomize_noise=False,
-                                                                           return_latents=True,
-                                                                           return_weight_deltas_and_codes=True,
-                                                                           weights_deltas=weights_deltas,
-                                                                           y_hat=recons, codes=codes
-                                                                           )
+            for _ in range(4):
 
-        # keep deltas of src and split chunks
-        weights_deltas = [w[:b] if w is not None else w for w in weights_deltas]
+                recons, latent, weights_deltas, codes, _ = autoencoder.forward(inputs,
+                                                                               randomize_noise=False,
+                                                                               return_latents=True,
+                                                                               return_weight_deltas_and_codes=True,
+                                                                               weights_deltas=weights_deltas,
+                                                                               y_hat=recons, codes=codes
+                                                                               )
+
+            # keep deltas of src and split chunks
+            weights_deltas = [w[:b] if w is not None else w for w in weights_deltas]
+        else:
+            # use standard e4e autoencoder
+            _, latent = autoencoder.get_initial_inversion(x)
+            weights_deltas = None
+
         chunks_x1, chunks_x2 = torch.split(latent, b)
 
         # interpolate at different alpha terms and check when class is changing
@@ -173,9 +183,8 @@ def main(data_path: str, resnet_50_path: str, decoder_path: str, encoder_path: s
 
         for a in all_alphas.keys():
             res = (all_alphas[a]['preds'] == all_alphas[a]['targets']).to(torch.float32).mean()
-            save_dict[k][a]['accuracy']: res
-            del save_dict[k][a]['preds']
-            del save_dict[k][a]['targets']
+            del save_dict[k][a]
+            save_dict[k][a] = res
 
     with open(f'{pickle_dir}/class_change_accuracies.pickle', 'wb') as f:
         pickle.dump(save_dict, f)
@@ -202,6 +211,7 @@ if __name__ == '__main__':
         resnet_50_path=arguments.resnet_50_path,
         decoder_path=arguments.decoder_path,
         encoder_path=arguments.encoder_path,
+        use_hyperstyle=arguments.use_hyperstyle,
         plots_dir=f'{arguments.visual_examples_saving_folder}/{arguments.name}',
         pickle_dir=f'{arguments.pickle_file_saving_folder}/{arguments.name}',
         batch_size=arguments.batch_size

@@ -7,13 +7,10 @@ import pickle
 
 def parse_args():
 
-    parser = argparse.ArgumentParser('Test top-1 accuracy of CNNs when interpolating images on NVAE chunks')
-
-    # TODO for public release, replace "default=..." with "required=True"
+    parser = argparse.ArgumentParser('Visualize results of "00_class_information" experiments')
 
     parser.add_argument('--results_path', type=str,
-                        default='../results/class_change_NVAE_large_latents_RESNET32/class_change_accuracies.pickle',
-                        help='.pickle file with pre-computed accuracies')
+                        required=True, help='.pickle file with pre-computed accuracies')
 
     parser.add_argument('--cnn_type', type=str, choices=['Resnet-32', 'Vgg-16', 'Resnet-50'],
                         help='name of CNN that has been evaluated')
@@ -51,14 +48,14 @@ def main(pickle_file: str, cnn_type: str, model_type: str):
 
     for i, latent in enumerate(accuracies.keys()):
 
-        table_row = f'{latent} & '
+        table_row = f'{latent.split("_")[-1]} & '
 
         latents_accuracies = []
 
         for alpha in accuracies[latent].keys():
 
             if i == 0:
-                alphas_x_labels.append(float(alpha))
+                alphas_x_labels.append(float(alpha.split("_")[-1]))
 
             latents_accuracies.append(accuracies[latent][alpha].item())
             table_row += f'{accuracies[latent][alpha].item():.3f} & '
@@ -68,10 +65,11 @@ def main(pickle_file: str, cnn_type: str, model_type: str):
         plt.plot(alphas_x_labels, latents_accuracies, linestyle=linestyles[i], linewidth=tickness[i],
         label=f'latent: {latent}', color=colors[i])
 
-    plt.legend()
+    plt.legend(bbox_to_anchor=(1., 1.), loc='upper left')
     plt.xlabel('alpha interpolation')
     plt.ylabel('Top-1 Accuracy')
     plt.title(f'Top-1 Accuracy of {cnn_type} when interpolating \nimages in {model_type} latent spaces')
+    plt.tight_layout()
     plt.show()
 
 
