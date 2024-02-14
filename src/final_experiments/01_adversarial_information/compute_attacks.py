@@ -3,13 +3,12 @@ import os
 import pickle
 
 import foolbox as fb
-import eagerpy as ep
 import kornia.enhance
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data.datasets import ImageLabelDataset
+from data.datasets import CoupledDataset
 from src.final_experiments.common_utils import load_ResNet_AFHQ_Wild, load_hub_CNN
 
 
@@ -50,8 +49,8 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
     # load correct cnn
     if attacked_net_type == 'resnet-50':
         base_net = load_ResNet_AFHQ_Wild(attacked_net_path, device)
-        preprocessing = dict(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], axis=-3)
-        normalize = kornia.enhance.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        preprocessing = None
+        normalize = lambda x: x
         image_size = 256
 
     else:
@@ -60,18 +59,30 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
         normalize = kornia.enhance.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         image_size = 32
 
+    # bounds are before preprocessing!
+    # preprocessing is normalization on the -3 axis (channel dims in pytorch images)
     attacked_model = fb.PyTorchModel(base_net, bounds=(0, 1), preprocessing=preprocessing, device=device)
 
     # dataloader
-    dataloader = DataLoader(ImageLabelDataset(folder=images_path, image_size=image_size),
+    dataloader = DataLoader(CoupledDataset(folder=images_path, image_size=image_size),
                             batch_size=batch_size, shuffle=False)
 
     # attacks and bounds
     if attack_type == 'whitebox-l2':
-        attacks = [fb.attacks.L2DeepFoolAttack(),
-                   fb.attacks.L2BasicIterativeAttack(), fb.attacks.L2ProjectedGradientDescentAttack(),
-                   fb.attacks.L2FastGradientAttack()]
-        attack_names = ['DeepFool_L2', 'BIM_L2', 'PGD_L2', 'FGM_L2']
+
+        attacks = [
+            fb.attacks.L2DeepFoolAttack(),
+            fb.attacks.L2BasicIterativeAttack(),
+            fb.attacks.L2ProjectedGradientDescentAttack(),
+            fb.attacks.L2FastGradientAttack(),
+        ]
+
+        attack_names = [
+            'DeepFool_L2',
+            'BIM_L2',
+            'PGD_L2',
+            'FGM_L2',
+        ]
         bounds = (0.1, 0.3, 0.5, 0.7, 0.9)
 
     elif attack_type == 'whitebox-linf':
@@ -96,34 +107,30 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
             }
 
     print('[INFO] Computing attacks on batches...')
-    for batch_idx, (images, labels) in enumerate(tqdm(dataloader)):
+    for batch_idx, (images, labels, starting_points, _) in enumerate(tqdm(dataloader)):
 
-        # if batch_idx == 1:
-        #     break
-
-        # foolbox wants ep tensors for working faster
-        images, labels = ep.astensors(*(images.to(device), labels.to(device)))
+        images, labels, starting_points = images.to(device), labels.to(device), starting_points.to(device)
 
         if attack_type == 'blackbox':
 
             with torch.no_grad():
 
-                # find starting points (random noise) (same for all attacks)
-                starting_points = torch.zeros_like(images.raw)
-                found_adv = torch.zeros_like(labels.raw)
+                # find starting points (same for both attacks)
+                found_adv = torch.zeros_like(labels)
 
                 while True:
 
-                    random_noise = torch.zeros_like(images.raw).uniform_(-1.0, 1.0)
-                    random_adv = torch.clip(images.raw + random_noise, 0., 1.)
-                    preds = torch.argmax(base_net(normalize(random_adv)), dim=1)
-                    is_adv = preds.ne(labels.raw)
-                    starting_points[is_adv] = random_adv[is_adv]
+                    preds = torch.argmax(base_net(normalize(starting_points)), dim=1)
+                    is_adv = preds.ne(labels)  # most of the time these are all adversaries
                     found_adv[is_adv] = 1.
 
                     if found_adv.sum().item() == found_adv.shape[0]:
                         break
-                starting_points = ep.astensor(starting_points)
+
+                    # update starting points for next round (only where not adversaries)
+                    random_noise = torch.zeros_like(starting_points).uniform_(-0.5, 0.5)
+                    random_adv = torch.clip(starting_points + random_noise, 0., 1.)
+                    starting_points[torch.logical_not(found_adv)] = random_adv[torch.logical_not(found_adv)]
 
         else:
             starting_points = None  # NOT USED
@@ -142,14 +149,14 @@ def main(attack_type: str, images_path: str, batch_size: int, attacked_net_path:
                 # save success rate of batch
                 save_dict[f'{name}={b:.3f}']['success_rate'] = torch.cat(
                     [save_dict[f'{name}={b:.3f}']['success_rate'],
-                     success[i].raw.to(torch.float32)]
+                     success[i].to(torch.float32)]
                 )
 
                 # save each adversarial
                 for img_idx in range(batch_size):
 
                     sample_n = f'{int(batch_idx * batch_size) + img_idx}'
-                    img = adv[i][img_idx].raw.permute(1, 2, 0).cpu().numpy()
+                    img = adv[i][img_idx].permute(1, 2, 0).cpu().numpy()
                     save_dict[f'{name}={b:.3f}']['adversarial_samples'][sample_n] = img
 
     # compute final success rate for each bound and save .pickle files
