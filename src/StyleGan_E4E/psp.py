@@ -101,7 +101,7 @@ class pSp(nn.Module):
         """
         get latents of shape B, NLATENTS, DIM and decode images
         """
-        images, _ = self.decoder([codes], input_is_latent=True)
+        images, _ = self.decoder([codes], input_is_latent=True, randomize_noise=False)
         images = self.face_pool(images)
         return images
 

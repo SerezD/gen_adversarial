@@ -33,7 +33,7 @@ def main(pickle_file: str, cnn_type: str, model_type: str):
         accuracies = pickle.load(f)
 
     alphas_x_labels = []
-    colors = ['lightcoral', 'darkorange', 'limegreen', 'dodgerblue', 'blueviolet', 'fuchsia',
+    colors = ['black', 'lightcoral', 'darkorange', 'limegreen', 'dodgerblue', 'blueviolet', 'fuchsia',
               'tomato', 'gold', 'teal', 'navy', 'mediumpurple', 'deeppink',
               'brown', 'yellow', 'forestgreen', 'deepskyblue', 'indigo', 'crimson']
 
@@ -48,14 +48,14 @@ def main(pickle_file: str, cnn_type: str, model_type: str):
 
     for i, latent in enumerate(accuracies.keys()):
 
-        table_row = f'{latent.split("_")[-1]} & '
+        table_row = f'{latent} & '
 
         latents_accuracies = []
 
         for alpha in accuracies[latent].keys():
 
             if i == 0:
-                alphas_x_labels.append(float(alpha.split("_")[-1]))
+                alphas_x_labels.append(float(alpha))
 
             latents_accuracies.append(accuracies[latent][alpha].item())
             table_row += f'{accuracies[latent][alpha].item():.3f} & '
