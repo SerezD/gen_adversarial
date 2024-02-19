@@ -80,9 +80,9 @@ def main(data_path: str, batch_size: int, cnn_type: str, cnn_path: str, nvae_pat
     alphas = np.arange(0, 1.1, 0.1)
 
     # dict for saving
-    dict_accuracies = {}  # will be {latent_i : {alpha_0.0: accuracy, ...} , ... }
+    dict_accuracies = {}  # will be {i : {a: accuracy, ...} , ... } where i = latent_idx and a = alpha
 
-    n_samples = 10
+    n_samples = 10   # to visualize
     example_images = torch.zeros((n_samples, len(latents_to_test), len(alphas), 3, 32, 32), device='cpu')
 
     print('[INFO] Starting Computation on each latent...')

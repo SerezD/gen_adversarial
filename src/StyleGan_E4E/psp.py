@@ -46,6 +46,7 @@ class pSp(nn.Module):
 
     def forward(self, x, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
                 inject_latent=None, return_latents=False, alpha=None):
+
         if input_code:
             codes = x
         else:
@@ -80,6 +81,29 @@ class pSp(nn.Module):
             return images, result_latent
         else:
             return images
+
+    def encode(self, x: torch.Tensor):
+        """
+        takes batch of images and returns tensor of codes (B, NLATENTS, DIM)
+        """
+        codes = self.encoder(x)
+
+        # normalize with respect to the center of an average face
+        if self.opts.start_from_latent_avg:
+            if codes.ndim == 2:
+                codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)[:, 0, :]
+            else:
+                codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)
+
+        return codes
+
+    def decode(self, codes: torch.Tensor):
+        """
+        get latents of shape B, NLATENTS, DIM and decode images
+        """
+        images, _ = self.decoder([codes], input_is_latent=True)
+        images = self.face_pool(images)
+        return images
 
     def __load_latent_avg(self, ckpt, repeat=None):
         if 'latent_avg' in ckpt:

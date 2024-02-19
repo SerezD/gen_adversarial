@@ -46,7 +46,9 @@ def main(args):
 
         images = normalize(images.to(device), mean=mean_vec, std=std_vec)
 
-        recons = net(images)
+        # recons = net(images)
+        codes = net.encode(images)
+        recons = net.decode(codes)
 
         display = make_grid(
             denormalize(torch.cat((images, recons), dim=0), mean=mean_vec, std=std_vec),
@@ -54,7 +56,6 @@ def main(args):
         plt.imshow(display)
         plt.axis(False)
         plt.show()
-
 
 
 if __name__ == "__main__":

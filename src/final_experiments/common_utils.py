@@ -4,7 +4,7 @@ from argparse import Namespace
 import torch
 
 from src.NVAE.mine.model import AutoEncoder
-from src.StyleGan.models.hyperstyle import HyperStyle
+from src.StyleGan_E4E.psp import pSp
 from src.classifier.model import ResNet
 
 
@@ -25,45 +25,44 @@ def load_NVAE(checkpoint_path: str, device: str):
     return nvae
 
 
-def load_hub_CNN(model_path: str, type: str, device: str):
+def load_hub_CNN(model_path: str, cnn_type: str, device: str):
     """
     returns a CNN model (resnet32 or vgg16) downloaded from torch hub and pre-trained on CIFAR10.
     model source = https://github.com/chenyaofo/pytorch-cifar-models
 
     :param model_path: path to model downloaded from hub (if not found, will download it)
-    :param type: choice is 'resnet32' or 'vgg16'
+    :param cnn_type: choice is 'resnet32' or 'vgg16'
     :param device: model will be returned in eval mode on this device
     """
 
     os.environ["TORCH_HOME"] = model_path
 
-    if type == 'resnet32' or type == 'resnet-32':
+    if cnn_type == 'resnet32' or cnn_type == 'resnet-32':
         cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet32", pretrained=True)
-    elif type == 'vgg16' or type == 'vgg-16':
+    elif cnn_type == 'vgg16' or cnn_type == 'vgg-16':
         cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_vgg16_bn", pretrained=True)
     else:
-        raise ValueError(f"parameter type = {type} not recognized.")
+        raise ValueError(f"parameter type = {cnn_type} not recognized.")
 
     cnn = cnn.to(device).eval()
     return cnn
 
 
-def load_StyleGan(encoder_path: str, decoder_path: str, device: str):
+def load_StyleGan(checkpoint_path: str, device: str):
 
-    ckpt = torch.load(decoder_path, map_location='cpu')
-
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
     opts = ckpt['opts']
-    opts['checkpoint_path'] = decoder_path
-    opts['load_w_encoder'] = True
-    opts['w_encoder_checkpoint_path'] = encoder_path
+
+    opts['checkpoint_path'] = checkpoint_path
+    opts['device'] = device
     opts = Namespace(**opts)
 
-    autoencoder = HyperStyle(opts)
-    autoencoder.to(device).eval()
-    return autoencoder
+    net = pSp(opts)
+    net = net.to(device).eval()
+    return net
 
 
-def load_ResNet_AFHQ_Wild(path: str, device: str):
+def load_ResNet_CelebA_Id(path: str, device: str):
 
     ckpt = torch.load(path, map_location='cpu')
     resnet = ResNet()
