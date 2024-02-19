@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument('--checkpoint_base_path', type=str, default='./runs/',
                         help='directory where checkpoints are saved')
 
-    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--lr', type=float, default=1e-3)
 
     parser.add_argument('--resume_from', type=str, default=None,
@@ -103,18 +103,21 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
     val_augmentations = Normalize(mean=0.5, std=0.5)
 
     if WORLD_RANK == 0:
-        print(f"[INFO] final batch size per device: {batch_size}")
+        line = f"[INFO] final batch size per device: {batch_size}\n"
+        print(line)
+        args.log.append(line)
 
     return train_dataloader, val_dataloader, train_augmentations, val_augmentations
 
 
 def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
-                model: ResNet, optimizer: torch.optim.Optimizer, global_step: int):
+                model: ResNet, optimizer: torch.optim.Optimizer, args: argparse.Namespace, global_step: int):
     """
     :param dataloader: train dataloader.
     :param augmentations: augmentation module.
     :param model: model in training mode. Remember to pass ".module" with DDP.
     :param optimizer: optimizer object from torch.optim.Optimizer.
+    :param args:
     :param global_step: for monitoring total number of steps.
     """
 
@@ -145,12 +148,14 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
     if WORLD_RANK == 0:
 
         epoch_loss = sum(epoch_losses) / len(epoch_losses)
-        print(f'[INFO] step: {global_step} - training loss: {epoch_loss:.4f}')
+        line = f'[INFO] step: {global_step} - training loss: {epoch_loss:.4f}\n'
+        print(line)
+        args.log.append(line)
 
     return global_step
 
 
-def epoch_validation(dataloader: DataLoader, model: ResNet, augmentations, global_step: int):
+def epoch_validation(dataloader: DataLoader, model: ResNet, augmentations, args, global_step: int):
 
     all_preds = torch.empty((0, 1), device=f"cuda:{LOCAL_RANK}")
     all_targets = torch.empty((0, 1), device=f"cuda:{LOCAL_RANK}")
@@ -173,13 +178,16 @@ def epoch_validation(dataloader: DataLoader, model: ResNet, augmentations, globa
     accuracy = correct_preds / (n * WORLD_SIZE)
 
     if WORLD_RANK == 0:
-        print(f'[INFO] step: {global_step} - accuracy: {accuracy * 100:.2f}')
-
+        line = f'[INFO] step: {global_step} - accuracy: {accuracy * 100:.2f}\n'
+        print(line)
+        args.log.append(line)
 
 
 def main(args: argparse.Namespace):
 
     setup(WORLD_RANK, WORLD_SIZE, args.seed)
+
+    args.log = []
 
     # Get data loaders.
     train_loader, val_loader, train_augmentations, val_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
@@ -191,7 +199,9 @@ def main(args: argparse.Namespace):
     if args.resume_from is not None:
 
         if WORLD_RANK == 0:
-            print(f'[INFO] Loading checkpoint from: {args.resume_from}')
+            line = f'[INFO] Loading checkpoint from: {args.resume_from}\n'
+            print(line)
+            args.log.append(line)
 
         checkpoint = torch.load(args.resume_from, map_location=f'cuda:{LOCAL_RANK}')
         model.load_state_dict(checkpoint['state_dict'])
@@ -199,19 +209,25 @@ def main(args: argparse.Namespace):
         init_epoch = checkpoint['epoch']
 
         if WORLD_RANK == 0:
-            print(f'[INFO] Start from Epoch: {init_epoch} - Step: {global_step}')
+            line = f'[INFO] Start from Epoch: {init_epoch} - Step: {global_step}\n'
+            print(line)
+            args.log.append(line)
 
     else:
         global_step, init_epoch = 0, 0
 
         if WORLD_RANK == 0:
-            print(summary(model, torch.zeros((1, 3, 256, 256), device=f'cuda:{LOCAL_RANK}'), show_input=False))
+            line = summary(model, torch.zeros((1, 3, 256, 256), device=f'cuda:{LOCAL_RANK}'), show_input=False)
+            print(line)
+            args.log.append(line)
 
     # find final learning rate
     learning_rate = float(args.lr)
 
     if WORLD_RANK == 0:
-        print(f'[INFO] final learning rate: {learning_rate}')
+        line = f'[INFO] final learning rate: {learning_rate}\n'
+        print(line)
+        args.log.append(line)
 
     # ddp model, optimizer, scheduler, scaler
     ddp_model = DDP(model, device_ids=[LOCAL_RANK])
@@ -221,11 +237,13 @@ def main(args: argparse.Namespace):
     for epoch in range(init_epoch, args.epochs):
 
         if WORLD_RANK == 0:
-            print(f'[INFO] Epoch {epoch+1}/{args.epochs}')
+            line = f'[INFO] Epoch {epoch+1}/{args.epochs}\n'
+            print(line)
+            args.log.append(line)
 
         # Training
         ddp_model.train()
-        global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, global_step)
+        global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, args, global_step)
 
         # Validation
         dist.barrier()
@@ -234,15 +252,19 @@ def main(args: argparse.Namespace):
         if epoch % eval_freq == 0 or epoch == (args.epochs - 1):
 
             if WORLD_RANK == 0:
-                print('[INFO] Validating')
+                line = '[INFO] Validating\n'
+                print(line)
+                args.log.append(line)
 
             ddp_model.eval()
             with torch.no_grad():
-                epoch_validation(val_loader, ddp_model.module, val_augmentations, global_step)
+                epoch_validation(val_loader, ddp_model.module, val_augmentations, args, global_step)
 
             # Save checkpoint (after validation)
             if WORLD_RANK == 0:
-                print(f'[INFO] Saving Checkpoint')
+                line = '[INFO] Saving Checkpoint\n'
+                print(line)
+                args.log.append(line)
 
                 ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/epoch={epoch:02d}.pt"
                 torch.save({'epoch': epoch + 1, 'global_step': global_step,
@@ -252,12 +274,17 @@ def main(args: argparse.Namespace):
             dist.barrier()
 
     if WORLD_RANK == 0:
-        print(f'[INFO] Saving Checkpoint')
+        line = '[INFO] Saving Checkpoint\n'
+        print(line)
+        args.log.append(line)
 
         ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/last.pt"
         torch.save({'epoch': args.epochs, 'global_step': global_step,
                     'state_dict': ddp_model.module.state_dict()},
                    ckpt_file)
+
+        with open(f"{args.checkpoint_base_path}/{args.run_name}/log.txt", 'w') as f:
+            f.writelines(args.log)
 
     cleanup()
 
