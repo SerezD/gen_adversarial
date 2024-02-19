@@ -9,7 +9,7 @@ class ResNet(nn.Module):
 
         super().__init__()
 
-        num_classes = 307
+        num_classes = 64
 
         self.model = resnet50(pretrained=True)
 
