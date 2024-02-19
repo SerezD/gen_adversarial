@@ -90,7 +90,7 @@ class ResNet(nn.Module):
         super().__init__()
 
         layers = [3, 4, 6, 3]
-        num_classes = 6
+        num_classes = 307
 
         self.inplanes = 64
         self.dilation = 1

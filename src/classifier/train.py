@@ -2,12 +2,12 @@ import argparse
 import os
 import warnings
 import socket
-import wandb
 
 import numpy as np
 
 import torch
 import torch.distributed as dist
+from kornia.enhance import Normalize
 from torch.backends import cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -21,13 +21,13 @@ from src.classifier.model import ResNet
 
 def parse_args():
 
-    parser = argparse.ArgumentParser('Resnet50 training on animal faces HQ - 6 classes')
+    parser = argparse.ArgumentParser('Resnet50 training on Celeba Identities - 307 classes')
 
     parser.add_argument('--run_name', type=str, default='test')
     parser.add_argument('--data_path', type=str, required=True,
                         help='directory of ffcv datasets (.beton files)')
 
-    parser.add_argument('--cumulative_bs', type=int, default=32)
+    parser.add_argument('--cumulative_bs', type=int, default=8)
     parser.add_argument('--seed', type=int, default=0)
 
     parser.add_argument('--checkpoint_base_path', type=str, default='./runs/',
@@ -98,12 +98,14 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
                                         mode='validation')
 
     train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
+                                                 Normalize(mean=0.5, std=0.5),
                                                  same_on_batch=False)
+    val_augmentations = Normalize(mean=0.5, std=0.5)
 
     if WORLD_RANK == 0:
         print(f"[INFO] final batch size per device: {batch_size}")
 
-    return train_dataloader, val_dataloader, train_augmentations
+    return train_dataloader, val_dataloader, train_augmentations, val_augmentations
 
 
 def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
@@ -148,14 +150,14 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
     return global_step
 
 
-def epoch_validation(dataloader: DataLoader, model: ResNet, global_step: int):
+def epoch_validation(dataloader: DataLoader, model: ResNet, augmentations, global_step: int):
 
     all_preds = torch.empty((0, 1), device=f"cuda:{LOCAL_RANK}")
     all_targets = torch.empty((0, 1), device=f"cuda:{LOCAL_RANK}")
 
     for step, batch in enumerate(tqdm(dataloader)):
 
-        x, y = batch
+        x, y = augmentations(batch[0]), batch[1]
 
         logits = model(x)
         preds = torch.argmax(logits, dim=1, keepdim=True)
@@ -180,7 +182,7 @@ def main(args: argparse.Namespace):
     setup(WORLD_RANK, WORLD_SIZE, args.seed)
 
     # Get data loaders.
-    train_loader, val_loader, train_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
+    train_loader, val_loader, train_augmentations, val_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
 
     # create model and move it to GPU with id rank
     model = ResNet().to(LOCAL_RANK)
@@ -236,7 +238,7 @@ def main(args: argparse.Namespace):
 
             ddp_model.eval()
             with torch.no_grad():
-                epoch_validation(val_loader, ddp_model.module, global_step)
+                epoch_validation(val_loader, ddp_model.module, val_augmentations, global_step)
 
             # Save checkpoint (after validation)
             if WORLD_RANK == 0:
@@ -250,8 +252,6 @@ def main(args: argparse.Namespace):
             dist.barrier()
 
     if WORLD_RANK == 0:
-        wandb.finish()
-
         print(f'[INFO] Saving Checkpoint')
 
         ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/last.pt"
@@ -306,6 +306,5 @@ if __name__ == '__main__':
     try:
         main(arguments)
     except KeyboardInterrupt as e:
-        wandb.finish()
         dist.destroy_process_group()
         raise e
