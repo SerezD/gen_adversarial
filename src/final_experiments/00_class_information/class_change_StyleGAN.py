@@ -12,7 +12,7 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.datasets import CoupledDataset
-from src.final_experiments.common_utils import load_ResNet_CelebA_Id, load_StyleGan
+from src.final_experiments.common_utils import load_ResNet_CelebA, load_StyleGan
 
 
 def parse_args():
@@ -61,7 +61,7 @@ def main(data_path: str, resnet_50_path: str, stylegan_path: str,
          pickle_dir: str, plots_dir: str, batch_size: int, device: str = 'cuda:0'):
 
     # Load resnet
-    resnet = load_ResNet_CelebA_Id(resnet_50_path, device)
+    resnet = load_ResNet_CelebA(resnet_50_path, device)
 
     # Load StyleNetWork
     autoencoder = load_StyleGan(stylegan_path, device)

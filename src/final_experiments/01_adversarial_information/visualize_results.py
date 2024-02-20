@@ -148,6 +148,23 @@ def main(adversarial_pickles_folder: str, distances_pickles_folder: str, images_
         # plt.savefig(f'{save_dir}/{attack_name}_success.png')
         # plt.close()
 
+        # TODO DISTANCES
+        # # L2 TODO ensure this is correct
+        #             l2_dist = torch.norm(a / c, dim=1, p=2)
+        #             l2_dist = l2_dist / c.shape[1]  # normalize by size
+        #             l2_mean = l2_dist.mean().item()
+        #             l2_std = l2_dist.std().item()
+        #
+        #             # KL
+        #             # Create distributions from the data
+        #             P_distribution = torch.distributions.MultivariateNormal(c.mean(dim=0),
+        #                                                                     covariance_matrix=torch.diag(c.var(dim=0)))
+        #             Q_distribution = torch.distributions.MultivariateNormal(a.mean(dim=0),
+        #                                                                     covariance_matrix=torch.diag(a.var(dim=0)))
+        #
+        #             # Compute the KL divergence
+        #             kl_divergence = torch.distributions.kl_divergence(P_distribution, Q_distribution).item()
+
 if __name__ == '__main__':
 
     arguments = parse_args()

@@ -62,10 +62,10 @@ def load_StyleGan(checkpoint_path: str, device: str):
     return net
 
 
-def load_ResNet_CelebA_Id(path: str, device: str):
+def load_ResNet_CelebA(path: str, device: str):
 
     ckpt = torch.load(path, map_location='cpu')
-    resnet = ResNet()
+    resnet = ResNet(get_weights=False)
     resnet.load_state_dict(ckpt['state_dict'])
     resnet.to(device).eval()
     return resnet
