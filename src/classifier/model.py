@@ -9,7 +9,7 @@ class ResNet(nn.Module):
 
         super().__init__()
 
-        num_classes = 64
+        num_classes = 2  # gender classification
 
         self.model = resnet50(pretrained=True)
 

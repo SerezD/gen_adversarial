@@ -36,7 +36,7 @@ def main(args):
     print(f"images path: {images_path}")
 
     test_dataset = ImageDataset(folder=images_path, image_size=256, ffcv=None)
-    data_loader = DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, drop_last=False)
+    data_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, drop_last=False)
     mean_vec = torch.tensor([0.5, 0.5, 0.5], device=device)
     std_vec = torch.tensor([0.5, 0.5, 0.5], device=device)
 
@@ -52,10 +52,13 @@ def main(args):
 
         display = make_grid(
             denormalize(torch.cat((images, recons), dim=0), mean=mean_vec, std=std_vec),
-            nrow=len(test_dataset)).permute(1, 2, 0).cpu().numpy()
+            nrow=4).permute(1, 2, 0).cpu().numpy()
         plt.imshow(display)
         plt.axis(False)
+        plt.tight_layout()
         plt.show()
+
+        break
 
 
 if __name__ == "__main__":
@@ -73,7 +76,7 @@ if __name__ == "__main__":
     parser.add_argument("--align", action="store_true", help="align face images before inference")
 
     args = parser.parse_args()
-    args.images_dir = '/media/dserez/datasets/celeba_identities/test/5/'
+    args.images_dir = '/media/dserez/datasets/celeba_hq_gender/test/female/'
     args.save_dir = './results/'
     args.ckpt = '/media/dserez/runs/stylegan2/inversions/e4e_ffhq_encoder.pt'
 
