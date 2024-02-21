@@ -90,31 +90,29 @@ def main(images_path: str, batch_size: int, attacked_net_path: str, attacked_net
     bounds_l2 = (0.1, 0.3, 0.5, 0.7, 0.9)
     bounds_l_inf = (1/255, 2/255, 4/255, 8/255, 16/255)
 
-    # create a unique dict to save results
-    # formatted as:
-    #        {attack_lp: {bound: {'i': (np.array(3, H, W); float ) }; ...}; ...}
-    #        where 'i' is the index sample in the original ordering; the array is the adversarial sample and float
-    #        is 1 if attack is successful, 0 otherwise
-    save_dict = {}
-    for n in attack_names:
-        save_dict[f'{n}'] = {}
-
-        bounds = bounds_l2 if 'L2' in n else bounds_l_inf
-        for b in bounds:
-            save_dict[f'{n}'][f'{b:.3f}'] = {}
 
     print('[INFO] Computing attacks on batches...')
+    for (name, attack) in tqdm(zip(attack_names, attacks)):
 
-    for batch_idx, (images, labels) in enumerate(tqdm(dataloader)):
+        bounds = bounds_l2 if 'L2' in name else bounds_l_inf
 
-        # if batch_idx == 2:
-        #     break
+        # create a unique dict to save results
+        # formatted as:
+        #        {bound: {'i': (np.array(3, H, W); float ) }; ...}
+        #        where 'i' is the index sample in the original ordering; the array is the adversarial sample and float
+        #        is 1 if attack is successful, 0 otherwise
+        save_dict = {}
 
-        images, labels = torch.clip(images.to(device), 0., 1.), labels.to(device)
+        for b in bounds:
+            save_dict[f'{b:.3f}'] = {}
 
-        for (name, attack) in zip(attack_names, attacks):
+        # loop on all batches
+        for batch_idx, (images, labels) in enumerate(dataloader):
 
-            bounds = bounds_l2 if 'L2' in name else bounds_l_inf
+            # if batch_idx == 2:
+            #     break
+
+            images, labels = torch.clip(images.to(device), 0., 1.), labels.to(device)
             _, adv, success = attack(attacked_model, images, labels, epsilons=bounds)
 
             for i, b in enumerate(bounds):
@@ -125,14 +123,12 @@ def main(images_path: str, batch_size: int, attacked_net_path: str, attacked_net
                 for img_idx, (a, s) in enumerate(zip(adv_i, suc_i)):
 
                     sample_n = f'{int(batch_idx * batch_size) + img_idx}'
-                    save_dict[f'{name}'][f'{b:.3f}'][sample_n] = (a.cpu().numpy(), 1. if s else 0.)
+                    save_dict[f'{b:.3f}'][sample_n] = (a.cpu().numpy(), 1. if s else 0.)
 
-    # compute final success rate for each bound and save .pickle files
-    for attack in save_dict.keys():
-        file_name = f'{out_folder}{attack}.pickle'
-        values_dict = save_dict[attack]
+        # .pickle file for this attack
+        file_name = f'{out_folder}{name}.pickle'
         with open(file_name, 'wb') as f:
-            pickle.dump(values_dict, f)
+            pickle.dump(save_dict, f)
 
 
 if __name__ == '__main__':

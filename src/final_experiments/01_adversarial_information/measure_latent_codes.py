@@ -101,10 +101,9 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
                               torch.tensor([0.5, 0.5, 0.5], device=device),
                               torch.tensor([0.5, 0.5, 0.5], device=device))
                     clean_codes = autoencoder.encode(samples)
-                    pattern = ' '  # TODO
+                    clean_codes = rearrange(clean_codes, 'b l d -> l b d')
                 else:
                     clean_codes = autoencoder.encode(samples, deterministic=True)
-                    pattern = 'd h w -> (d h w)'
 
                 for latent_idx, latents in enumerate(clean_codes):
 
@@ -114,7 +113,7 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
                     for img_idx, c in enumerate(latents):
 
                         sample_n = f'{int(batch_idx * batch_size) + img_idx}'
-                        clean_samples[latent_idx][sample_n] = rearrange(c, pattern).cpu().numpy()
+                        clean_samples[latent_idx][sample_n] = c.view(-1).cpu().numpy()
 
             # Compute and save codes for each attack-bound
             for bound in attack_results.keys():
@@ -125,7 +124,7 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
 
                 # load adversaries
                 advs = np.stack([adversaries[str(i)][0] for i in
-                                 range(batch_idx * batch_size, (batch_idx + 1) * batch_size)])
+                                 range(batch_idx * batch_size, min((batch_idx + 1) * batch_size, len(adversaries)))])
                 advs = torch.from_numpy(advs).to(device)
 
                 if cnn_name == 'resnet-50':
@@ -133,10 +132,9 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
                                      torch.tensor([0.5, 0.5, 0.5], device=device),
                                      torch.tensor([0.5, 0.5, 0.5], device=device))
                     advs_codes = autoencoder.encode(advs)
-                    pattern = ' '  # TODO
+                    advs_codes = rearrange(advs_codes, 'b l d -> l b d')
                 else:
                     advs_codes = autoencoder.encode(advs, deterministic=True)
-                    pattern = 'd h w -> (d h w)'
 
                 for latent_idx, latents in enumerate(advs_codes):
 
@@ -145,7 +143,7 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
 
                     for img_idx, c in enumerate(latents):
                         sample_n = f'{int(batch_idx * batch_size) + img_idx}'
-                        final_dict[attack_name][bound][latent_idx][sample_n] = rearrange(c, pattern).cpu().numpy()
+                        final_dict[attack_name][bound][latent_idx][sample_n] = c.view(-1).cpu().numpy()
 
     # save pickle file for clean samples
     with open(f'{dst_folder}/CleanSamples.pickle', 'wb') as f:
