@@ -43,7 +43,7 @@ def parse_args():
 
 def main(adversarial_pickles_folder: str, distances_pickles_folder: str, images_folder: str, batch_size: int):
 
-    # cnn name and generator name
+    # extract cnn name and generator name for saving results
     adversarial_pickles_folder = adversarial_pickles_folder if adversarial_pickles_folder[-1] != '/' \
         else adversarial_pickles_folder[:-1]
 
@@ -53,117 +53,145 @@ def main(adversarial_pickles_folder: str, distances_pickles_folder: str, images_
     cnn_name = adversarial_pickles_folder.split('/')[-1].split('_')[-1]
     gen_name = distances_pickles_folder.split('/')[-2]
 
-    # dataloader and batch_size random indices
-    image_size = 32 if 'cifar10' in images_folder else '256'
-    data = ImageDataset(folder=images_folder, image_size=image_size)
-    indexes = np.random.randint(low=0, high=len(data), size=batch_size)
-    gt_images = np.stack([data[i] for i in indexes], axis=0).transpose(0, 2, 3, 1)
-
-    # make dir to save plots
-    save_dir = f'{adversarial_pickles_folder}/plots/'
+    # create dir to save plots
+    save_dir = f'./plots/'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    # get all pickle files
-    attack_files = sorted(os.listdir(adversarial_pickles_folder))[:-1]  # remove the created 'plots' folder
+    # save an out file at the end
+    out_file_name = f'./{cnn_name}_{gen_name}_table_results.txt'
+    printed_rows = []
+
+    # load a random batch of gt samples.
+    image_size = 32 if 'cifar10' in images_folder else 256
+    data = ImageDataset(folder=images_folder, image_size=image_size)
+    random_indexes = np.random.randint(low=0, high=len(data), size=batch_size)
+    gt_images = np.stack([data[i] for i in random_indexes], axis=0)
+
+    # get all pickle files (in the same ordering, since they have the same name)
+    attack_files = sorted(os.listdir(adversarial_pickles_folder))
     distances_files = sorted(os.listdir(distances_pickles_folder))
+    distances_files.remove('CleanSamples.pickle')
 
-    final_dict = {}
+    # load clean samples, formatted as: {latent_idx (int): {'sample_idx' (str): np.array (latent_len)}}
+    with open(f'{distances_pickles_folder}/CleanSamples.pickle', 'rb') as f:
+        clean_latents = pickle.load(f)
 
-    for (a_f, d_f) in zip(attack_files, distances_files):
+    # from 0 to n_latents
+    arange_on_clean_latents = list(clean_latents.keys())
+
+    # loop all files
+    for (attack_f, distances_f) in zip(attack_files, distances_files):
 
         # check that we are opening results for the same file!
-        assert a_f == d_f
+        assert attack_f == distances_f
 
         # get files content
-        with open(f'{adversarial_pickles_folder}/{a_f}', 'rb') as f:
-            adversaries = pickle.load(f)
+        with open(f'{adversarial_pickles_folder}/{attack_f}', 'rb') as f:
 
-        with open(f'{distances_pickles_folder}/{d_f}', 'rb') as f:
-            latents = pickle.load(f)
+            # Formatted as {bound (str): {sample_idx (str): [np.array (latent_len), success: float]}}
+            adversaries_and_success_rate_dict = pickle.load(f)
 
-        # # load and save some adversaries
-        # adversarial_examples = np.stack([adversaries['adversarial_samples'][f'{i}'] for i in indexes], axis=0)
-        # adversarial_diffs = np.abs(gt_images - adversarial_examples)
-        # norm_factor = np.max(adversarial_diffs.reshape(batch_size, -1), axis=1).reshape(batch_size, 1, 1, 1)
-        # adversarial_diffs = adversarial_diffs / norm_factor
-        #
-        # display = np.concatenate([gt_images, adversarial_examples, adversarial_diffs]).transpose(0, 3, 1, 2)
-        # display = make_grid(torch.tensor(display), nrow=batch_size).permute(1, 2, 0).numpy()
-        # plt.imshow(display)
-        # plt.axis(False)
-        # plt.title(f'Attack: {a_f[:-7]} on {cnn_name}')
-        # plt.tight_layout()
-        # plt.savefig(f'{save_dir}/{a_f[:-7]}.png')
-        # plt.close()
+        with open(f'{distances_pickles_folder}/{distances_f}', 'rb') as f:
 
-        # update final dict
-        attack_name, bound_n = a_f[:-7].split('=')
+            # Formatted as {bound (str): {latent_idx (int), sample_idx (str): np.array (latent_len)}}
+            adversarial_latents = pickle.load(f)
 
-        if attack_name not in final_dict.keys():
-            final_dict[attack_name] = {}
+        # get list of bounds for this attack
+        bounds = list(adversaries_and_success_rate_dict.keys())
+        overall_success_rate_per_bound = []  # save overall success rate for final plot
 
-        final_dict[attack_name][bound_n] = {
-            'success_rate': adversaries['success_rate'],
-        }
-        final_dict[attack_name][bound_n].update(latents)
+        printed_rows.append('########################## \n')
+        printed_rows.append(f'Attack & Latent & {" ".join(bounds)} \\\\ \n')
 
-    print(f'ATTACKS TO {cnn_name} MEASURED ON {gen_name}')
-    for attack_name in final_dict.keys():
+        # each row is formatted as  "attack name & latent idx & KL_for_bound ... "
+        latents_vs_bounds_rows = [f'{attack_f[:-7]} & {idx} & ' for idx in arange_on_clean_latents]
 
-        print('#'*25)
-        print(f'{attack_name}')
+        # same but KL is computed only in the successful samples
+        latents_vs_bounds_rows_successful = [f'{attack_f[:-7]}-S & {idx} & ' for idx in arange_on_clean_latents]
 
-        bounds = []
-        success_rates = []
-        rows = None
+        # loop on each bound
+        for bound_idx, bound in enumerate(bounds):
 
-        for bound_n in final_dict[attack_name].keys():
+            # load and save some adversaries
+            adversarial_examples = np.stack([adversaries_and_success_rate_dict[bound][f'{i}'][0] for i in random_indexes], axis=0)
+            adversarial_diffs = np.abs(gt_images - adversarial_examples)
+            norm_factor = np.max(adversarial_diffs.reshape(batch_size, -1), axis=1).reshape(batch_size, 1, 1, 1)
+            adversarial_diffs = adversarial_diffs / norm_factor
 
-            if rows is None:
-                rows = [f'{l} &' for l in range(len(final_dict[attack_name][bound_n]) - 1)]  # n latents
+            display = np.concatenate([gt_images, adversarial_examples, adversarial_diffs])
+            display = make_grid(torch.tensor(display), nrow=batch_size).permute(1, 2, 0).numpy()
+            plt.imshow(display)
+            plt.axis(False)
+            plt.title(f'Attack: {attack_f[:-7]}={bound} on {cnn_name}')
+            plt.tight_layout()
+            plt.savefig(f'{save_dir}/{attack_f[:-7]}={bound}_{cnn_name}_{gen_name}_adversaries.png')
+            plt.close()
 
-            bounds.append(bound_n)
-            success_rates.append(final_dict[attack_name][bound_n]['success_rate'])
+            # load vector of success rate (1, 0) and save the overall success rate
+            attack_success = np.stack([adversaries_and_success_rate_dict[bound][f'{i}'][1] for i in range(len(data))], axis=0)
+            attack_success = torch.tensor(attack_success)
+            overall_success_rate_per_bound.append(torch.mean(attack_success).item())
 
-            for latent in final_dict[attack_name][bound_n].keys():
-                if latent == 'success_rate':
-                    continue
+            for latent_idx, latent in enumerate(arange_on_clean_latents):
 
-                latent_num = int(latent.split("_")[1])
-                rows[latent_num] += f' {final_dict[attack_name][bound_n][latent]["kl_divergence"]:.3f} &'
-                rows[latent_num] += f' {final_dict[attack_name][bound_n][latent]["l2_mean"]:.3f} &'
-                rows[latent_num] += f' {final_dict[attack_name][bound_n][latent]["l2_std"]:.3f} & '
+                # get adversarial latent vectors.
+                cln = np.stack([clean_latents[latent][f'{i}'] for i in range(len(data))], axis=0)
+                cln = torch.tensor(cln)
+                adv = np.stack([adversarial_latents[bound][latent][f'{i}'] for i in range(len(data))], axis=0)
+                adv = torch.tensor(adv)
 
-        print('bounds:', bounds)
+                # TODO what changes if you take the norm ?
 
-        for r in rows:
-            print(r[:-1] + '\\\\')
 
-        # plt.plot(bounds, success_rates)
-        # plt.tight_layout(pad=2.5)
-        # plt.title(f'attack: {attack_name} on {cnn_name}')
-        # plt.xlabel('bound value')
-        # plt.ylabel('attack success rate')
-        # plt.savefig(f'{save_dir}/{attack_name}_success.png')
-        # plt.close()
+                # compute KL distance for all vs only successful attacks
+                # L2 TODO ensure this is correct
+                # l2_dist = torch.norm(a / c, dim=1, p=2)
+                # l2_dist = l2_dist / c.shape[1]  # normalize by size
+                # l2_mean = l2_dist.mean().item()
+                # l2_std = l2_dist.std().item()
 
-        # TODO DISTANCES
-        # # L2 TODO ensure this is correct
-        #             l2_dist = torch.norm(a / c, dim=1, p=2)
-        #             l2_dist = l2_dist / c.shape[1]  # normalize by size
-        #             l2_mean = l2_dist.mean().item()
-        #             l2_std = l2_dist.std().item()
-        #
-        #             # KL
-        #             # Create distributions from the data
-        #             P_distribution = torch.distributions.MultivariateNormal(c.mean(dim=0),
-        #                                                                     covariance_matrix=torch.diag(c.var(dim=0)))
-        #             Q_distribution = torch.distributions.MultivariateNormal(a.mean(dim=0),
-        #                                                                     covariance_matrix=torch.diag(a.var(dim=0)))
-        #
-        #             # Compute the KL divergence
-        #             kl_divergence = torch.distributions.kl_divergence(P_distribution, Q_distribution).item()
+                # KL ALL
+                # Create distributions from the data
+                P_distribution = torch.distributions.MultivariateNormal(cln.mean(dim=0),
+                                                                        covariance_matrix=torch.diag(cln.var(dim=0)))
+                Q_distribution = torch.distributions.MultivariateNormal(adv.mean(dim=0),
+                                                                        covariance_matrix=torch.diag(adv.var(dim=0)))
+
+                # Compute the KL divergence
+                kl_divergence = torch.distributions.kl_divergence(P_distribution, Q_distribution).item()
+                latents_vs_bounds_rows[latent_idx] += f'{kl_divergence:.2f} & '
+
+                # KL SUCCESSFUL ONLY
+                cln = cln[attack_success.bool()]
+                adv = adv[attack_success.bool()]
+
+                # Create distributions from the data
+                P_distribution = torch.distributions.MultivariateNormal(cln.mean(dim=0),
+                                                                        covariance_matrix=torch.diag(cln.var(dim=0)))
+                Q_distribution = torch.distributions.MultivariateNormal(adv.mean(dim=0),
+                                                                        covariance_matrix=torch.diag(adv.var(dim=0)))
+
+                # Compute the KL divergence
+                kl_divergence = torch.distributions.kl_divergence(P_distribution, Q_distribution).item()
+                latents_vs_bounds_rows_successful[latent_idx] += f'{kl_divergence:.2f} & '
+
+
+
+        printed_rows += [f'{row[:-2]} \\\\ \n' for row in latents_vs_bounds_rows]
+        printed_rows += [f'{row[:-2]} \\\\ \n' for row in latents_vs_bounds_rows_successful]
+
+        # plot success rates
+        plt.plot(bounds, overall_success_rate_per_bound)
+        plt.tight_layout(pad=2.5)
+        plt.title(f'attack: {attack_f[:-7]} on {cnn_name}')
+        plt.xlabel('bound value')
+        plt.ylabel('attack success rate')
+        plt.savefig(f'{save_dir}/{attack_f[:-7]}_{cnn_name}_{gen_name}_success_rates.png')
+        plt.close()
+
+    with open(out_file_name, 'w') as f:
+        f.writelines(printed_rows)
 
 if __name__ == '__main__':
 

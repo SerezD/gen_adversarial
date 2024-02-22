@@ -87,6 +87,9 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
         attack_name = pickle_name.split('.')[0]
         final_dict[attack_name] = {}
 
+        for bound in attack_results.keys():
+            final_dict[attack_name][bound] = {}
+
         for batch_idx, samples in enumerate(dataloader):
 
             # if batch_idx == 8:
@@ -120,7 +123,6 @@ def main(attacks_folder: str, images_folder: str, batch_size: int, autoencoder_p
 
                 # get adversaries and prepare dict
                 adversaries = attack_results[bound]
-                final_dict[attack_name][bound] = {}
 
                 # load adversaries
                 advs = np.stack([adversaries[str(i)][0] for i in
