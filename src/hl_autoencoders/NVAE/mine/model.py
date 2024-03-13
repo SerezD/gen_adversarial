@@ -1,13 +1,13 @@
 from collections import OrderedDict
 
-from einops import rearrange, pack
+from einops import pack
 
 import torch
 from torch import nn
 
-from src.NVAE.mine.modules import ResidualCellEncoder, EncCombinerCell, NFBlock, ResidualCellDecoder, DecCombinerCell, \
+from src.hl_autoencoders.NVAE.mine.modules import ResidualCellEncoder, EncCombinerCell, NFBlock, ResidualCellDecoder, DecCombinerCell, \
     ARConv2d, Conv2D
-from src.NVAE.mine.distributions import Normal
+from src.hl_autoencoders.NVAE.mine.distributions import Normal
 
 
 class AutoEncoder(nn.Module):
@@ -712,3 +712,64 @@ class AutoEncoder(nn.Module):
         """
 
         return self.decode(self.encode(gt_images, deterministic))
+
+    def resample_codes(self, chunks: list, temperature: float = 1.):
+        """
+        len(chunks) is less than n. hierarchies, samples the remaining ones with given temperature
+        """
+
+        # assert at least one chunk is given
+        assert len(chunks) >= 1
+        chunks = chunks.copy()
+        resulting_codes = []
+
+        z_0 = chunks.pop(0)
+        resulting_codes.append(z_0)
+        b = z_0.shape[0]
+
+        # start from constant prior
+        x = self.const_prior.expand(b, -1, -1, -1)
+
+        # first combiner (inject z_0)
+        x = self.decoder_combiners.get_submodule('combiner_0:0')(x, z_0)
+
+        for s in range(self.num_scales):
+
+            scale = self.decoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                if not (s == 0 and g == 0):
+
+                    # group forward
+                    group = scale.get_submodule(f'group_{g}')
+
+                    for c in range(self.num_cells_per_group):
+                        x = group.get_submodule(f'cell_{c}')(x)
+
+                    # get code or sample it
+                    if len(chunks) > 0:
+                        z_i = chunks.pop(0)
+                    else:
+                        # extract params for p (conditioned on previous decoding)
+                        mu_p, log_sig_p = torch.chunk(
+                            self.dec_sampler.get_submodule(f'sampler_{s}:{g}')(x), 2, dim=1)
+
+                        # sample z_i
+                        dist = Normal(mu_p, log_sig_p, temp=temperature)
+                        z_i, _ = dist.sample()
+
+                    # apply NF
+                    if self.use_nf:
+                        z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
+
+                    resulting_codes.append(z_i)
+
+                    # combine x and z_i
+                    x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
+
+            # upsampling at the end of each scale
+            if s < self.num_scales - 1:
+                x = scale.get_submodule('upsampling')(x)
+
+        return resulting_codes

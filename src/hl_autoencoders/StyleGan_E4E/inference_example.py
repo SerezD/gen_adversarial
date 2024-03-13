@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from torchvision.utils import make_grid
 
 from data.datasets import ImageDataset
-from src.StyleGan_E4E.psp import pSp
+from src.hl_generative_models.StyleGan_E4E.psp import pSp
 
 
 def setup_model(checkpoint_path, device='cuda'):

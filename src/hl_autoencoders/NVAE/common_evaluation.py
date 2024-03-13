@@ -7,17 +7,16 @@ import numpy as np
 import torch
 from torch.cuda.amp import autocast
 from torchvision.utils import make_grid
-from einops import rearrange, pack
 
 from robustbench import load_cifar10
 
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-from src.NVAE.mine.distributions import DiscMixLogistic
-from src.NVAE.mine.model import AutoEncoder as NVAE
-from src.NVAE.original.model import AutoEncoder
-from src.NVAE.original.utils import get_arch_cells
+from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
+from src.hl_generative_models.NVAE.mine.model import AutoEncoder as NVAE
+from src.hl_generative_models.NVAE.original.model import AutoEncoder
+from src.hl_generative_models.NVAE.original.utils import get_arch_cells
 import torch.multiprocessing as mp
 import torch.distributed as dist
 

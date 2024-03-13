@@ -9,7 +9,6 @@ import logging
 import os
 import shutil
 import time
-from datetime import timedelta
 import sys
 
 import torch
@@ -17,7 +16,6 @@ import torch.nn as nn
 import numpy as np
 import torch.distributed as dist
 
-import torch.nn.functional as F
 from tensorboardX import SummaryWriter
 
 
@@ -240,7 +238,7 @@ def log_iw(decoder, x, log_q, log_p, crop=False):
 
 
 def reconstruction_loss(decoder, x, crop=False):
-    from src.NVAE.original.distributions import Normal, DiscMixLogistic
+    from src.hl_generative_models.NVAE.original.distributions import DiscMixLogistic
 
     recon = decoder.log_prob(x)
     if crop:

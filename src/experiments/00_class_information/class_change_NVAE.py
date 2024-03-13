@@ -11,7 +11,7 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.datasets import CoupledDataset
-from src.NVAE.mine.distributions import DiscMixLogistic
+from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
 from src.final_experiments.common_utils import load_NVAE, load_hub_CNN
 
 

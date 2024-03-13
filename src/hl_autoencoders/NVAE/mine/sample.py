@@ -11,8 +11,8 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 import numpy as np
 
-from src.NVAE.mine.distributions import DiscMixLogistic
-from src.NVAE.mine.model import AutoEncoder
+from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
+from src.hl_generative_models.NVAE.mine.model import AutoEncoder
 
 
 def parse_args():

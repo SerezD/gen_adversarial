@@ -21,9 +21,9 @@ from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip
 from tqdm import tqdm
 
 from data.loading_utils import ffcv_loader
-from src.NVAE.mine.distributions import DiscMixLogistic
-from src.NVAE.mine.model import AutoEncoder
-from src.NVAE.mine.utils import kl_balancer
+from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
+from src.hl_generative_models.NVAE.mine.model import AutoEncoder
+from src.hl_generative_models.NVAE.mine.utils import kl_balancer
 
 
 def parse_args():
