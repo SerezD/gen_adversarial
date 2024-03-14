@@ -8,7 +8,7 @@ Contains the abstract models for defense.
 """
 
 
-class BaseClassificationModel(ABC, nn.Module):
+class BaseClassificationModel(ABC):
 
     def __init__(self, model_path: str, device: str, preprocessing: AugmentationSequential = None):
         """
@@ -20,7 +20,7 @@ class BaseClassificationModel(ABC, nn.Module):
         :param preprocessing: kornia AugmentationSequential object to preprocess each batch before classification.
         """
 
-        super(BaseClassificationModel, self).__init__()
+        super().__init__()
 
         self.preprocessing = preprocessing.to(device) if preprocessing is not None else None
         self.classifier = self.load_classifier(model_path, device)
@@ -42,7 +42,7 @@ class BaseClassificationModel(ABC, nn.Module):
         self.classifier = self.classifier.to(device)
         self.preprocessing = self.preprocessing.to(device) if self.preprocessing is not None else None
 
-    def forward(self, batch: torch.Tensor) -> torch.Tensor:
+    def __call__(self, batch: torch.Tensor) -> torch.Tensor:
         """
         :param batch: image tensor of shape (B C H W)
         :return un-normalized predictions of shape (B N_CLASSES)
@@ -54,7 +54,7 @@ class BaseClassificationModel(ABC, nn.Module):
         return self.classifier(batch)
 
 
-class HLDefenseModel(ABC, nn.Module):
+class HLDefenseModel(ABC):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
                  autoencoder_preprocessing: AugmentationSequential = None):
@@ -69,7 +69,7 @@ class HLDefenseModel(ABC, nn.Module):
                                           auto encoding it.
         """
 
-        super(HLDefenseModel, self).__init__()
+        super().__init__()
 
         self.classifier = classifier
         self.classifier.set_device(device)
@@ -115,18 +115,17 @@ class HLDefenseModel(ABC, nn.Module):
         """
         pass
 
-    def forward(self, batch: torch.Tensor) -> list:
+    def __call__(self, batch: torch.Tensor) -> list:
         """
         :param batch: image tensor of shape (B C H W)
         :return un-normalized predictions of shape (B, N_CLASSES), computed on:
             1. the original images
-            2. the reconstructed images
-            3. the reconstructed and re-sampled images
+            2. the reconstructed and re-sampled images
         """
 
         # preprocessing before autoencoding
         if self.preprocessing is not None:
-            batch = self.autoencoder_preprocessing(batch)
+            batch = self.preprocessing(batch)
 
         # extract codes (encoding)
         original_codes = self.get_codes(batch)
@@ -135,12 +134,10 @@ class HLDefenseModel(ABC, nn.Module):
         new_codes = self.sample_codes(original_codes)
 
         # decode
-        original_recons = self.decode(original_codes)
         new_recons = self.decode(new_codes)
 
         # forward for final classification
         preds_clean = self.classifier(batch)
-        preds_original_recons = self.classifier(original_recons)
         preds_new_recons = self.classifier(new_recons)
 
-        return preds_clean, preds_original_recons, preds_new_recons
+        return preds_clean, preds_new_recons

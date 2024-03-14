@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 
-from src.hl_generative_models.StyleGan_E4E.encoding.encoder import Encoder4Editing
-from src.hl_generative_models.StyleGan_E4E.stylegan2.generator import Generator
+from src.hl_autoencoders.StyleGan_E4E.encoding.encoder import Encoder4Editing
+from src.hl_autoencoders.StyleGan_E4E.stylegan2.generator import Generator
 
 
 def get_keys(d, name):

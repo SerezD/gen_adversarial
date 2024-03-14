@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from src.hl_generative_models.StyleGan_E4E.stylegan2.op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
+from src.hl_autoencoders.StyleGan_E4E.stylegan2.op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
 
 
 class PixelNorm(nn.Module):

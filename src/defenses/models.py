@@ -1,3 +1,4 @@
+import math
 from argparse import Namespace
 
 from kornia.augmentation import Normalize
@@ -29,7 +30,7 @@ class Cifar10VGGModel(BaseClassificationModel):
                       std=torch.tensor([0.2673, 0.2564, 0.2761], device=device))
         )
 
-        super(BaseClassificationModel, self).__init__(model_path, device, preprocessing)
+        super().__init__(model_path, device, preprocessing)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -56,7 +57,7 @@ class Cifar10ResnetModel(BaseClassificationModel):
                       std=torch.tensor([0.2673, 0.2564, 0.2761], device=device))
         )
 
-        super(BaseClassificationModel, self).__init__(model_path, device, preprocessing)
+        super().__init__(model_path, device, preprocessing)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -78,7 +79,7 @@ class CelebAResnetModel(BaseClassificationModel):
         """
 
         # no preprocessing needed.
-        super(BaseClassificationModel, self).__init__(model_path, device)
+        super().__init__(model_path, device)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -97,7 +98,7 @@ class CelebAResnetModel(BaseClassificationModel):
 class Cifar10NVAEDefenseModel(HLDefenseModel):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
-                 resample_from: int, temperature: float):
+                 resample_from: int, temperature: float = 1.0):
         """
         Defense model using an NVAE pretrained on Cifar10.
 
@@ -110,7 +111,7 @@ class Cifar10NVAEDefenseModel(HLDefenseModel):
             "invalid classifier passed to Cifar10NVAEDefenseModel"
 
         # no need for preprocessing, since it is done directly in NVAE forward pass.
-        super(HLDefenseModel, self).__init__(classifier, autoencoder_path, device)
+        super().__init__(classifier, autoencoder_path, device)
 
         self.resample_from = resample_from
         self.temperature = temperature
@@ -141,7 +142,6 @@ class Cifar10NVAEDefenseModel(HLDefenseModel):
         """
         codes = self.autoencoder.encode(batch, deterministic=True)
 
-        # TODO verify this is needed.
         b, _, _, _ = batch.shape
         codes = [c.view(b, -1) for c in codes]
 
@@ -162,15 +162,22 @@ class Cifar10NVAEDefenseModel(HLDefenseModel):
         :return: batch of images of shape (B, C, H, W).
         """
 
-        # TODO, verify chunks are passed in the correct format.
-        logits = self.autoencoder.decode(codes)
+        # need to reformat codes in the correct shape
+        b = codes[0].shape[0]
+        d = self.autoencoder.num_latent_per_group
+        reshaped_codes = []
+        for c in codes:
+            r = int(math.sqrt(c.shape[1] // d))
+            reshaped_codes.append(c.reshape(b, d, r, r))
+
+        logits = self.autoencoder.decode(reshaped_codes)
         recons = DiscMixLogistic(logits).mean()
         return recons
 
 
 class CelebAStyleGanDefenseModel(HLDefenseModel):
 
-    def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str, device: str):
+    def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str, device: str, resample_from: int):
         """
         Defense model using an StyleGan pretrained on FFHQ.
         """
@@ -180,7 +187,9 @@ class CelebAStyleGanDefenseModel(HLDefenseModel):
             Normalize(mean=torch.tensor([0.5, 0.5, 0.5], device=device),
                       std=torch.tensor([0.5, 0.5, 0.5], device=device))
         )
-        super(HLDefenseModel, self).__init__(classifier, autoencoder_path, device, preprocessing)
+        super().__init__(classifier, autoencoder_path, device, preprocessing)
+
+        self.resample_from = resample_from
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """

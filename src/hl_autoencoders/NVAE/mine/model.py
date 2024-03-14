@@ -1,3 +1,4 @@
+import math
 from collections import OrderedDict
 
 from einops import pack
@@ -726,6 +727,8 @@ class AutoEncoder(nn.Module):
         z_0 = chunks.pop(0)
         resulting_codes.append(z_0)
         b = z_0.shape[0]
+        d, r = self.num_latent_per_group, int(math.sqrt(z_0.shape[1] // self.num_latent_per_group))
+        z_0 = z_0.reshape(b, d, r, r)
 
         # start from constant prior
         x = self.const_prior.expand(b, -1, -1, -1)
@@ -750,6 +753,8 @@ class AutoEncoder(nn.Module):
                     # get code or sample it
                     if len(chunks) > 0:
                         z_i = chunks.pop(0)
+                        r = int(math.sqrt(z_i.shape[1] // self.num_latent_per_group))
+                        z_i = z_i.reshape(b, d, r, r)
                     else:
                         # extract params for p (conditioned on previous decoding)
                         mu_p, log_sig_p = torch.chunk(
@@ -763,7 +768,7 @@ class AutoEncoder(nn.Module):
                     if self.use_nf:
                         z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
 
-                    resulting_codes.append(z_i)
+                    resulting_codes.append(z_i.view(b, -1))
 
                     # combine x and z_i
                     x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
