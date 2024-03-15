@@ -7,6 +7,7 @@ import foolbox as fb
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
+from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
 from src.defenses.models import Cifar10ResnetModel, CelebAResnetModel, Cifar10VGGModel, Cifar10NVAEDefenseModel, \
@@ -154,7 +155,7 @@ def main(args: argparse.Namespace):
     base_success_rate = torch.empty((len(bounds_l2), 0), device=device)
     def_success_rate = torch.empty((len(bounds_l2), 0), device=device)
 
-    for b_idx, (images, labels) in enumerate(dataloader):
+    for b_idx, (images, labels) in enumerate(tqdm(dataloader)):
 
         # if b_idx == 2:  # TODO REMOVE
         #     break
