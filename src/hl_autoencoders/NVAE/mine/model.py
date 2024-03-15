@@ -762,7 +762,8 @@ class AutoEncoder(nn.Module):
 
                         # sample z_i
                         dist = Normal(mu_p, log_sig_p, temp=temperature)
-                        z_i, _ = dist.sample()
+                        # z_i, _ = dist.sample()
+                        z_i = dist.mu  # Best to take mean
 
                     # apply NF
                     if self.use_nf:

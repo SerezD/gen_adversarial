@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
-from src.final_experiments.common_utils import load_ResNet_CelebA, load_hub_CNN
+from src.defenses.common_utils import load_ResNet_CelebA, load_hub_CNN
 
 
 def parse_args():
@@ -89,7 +89,6 @@ def main(images_path: str, batch_size: int, attacked_net_path: str, attacked_net
     ]
     bounds_l2 = (0.1, 0.3, 0.5, 0.7, 0.9)
     bounds_l_inf = (1/255, 2/255, 4/255, 8/255, 16/255)
-
 
     print('[INFO] Computing attacks on batches...')
     for (name, attack) in tqdm(zip(attack_names, attacks)):

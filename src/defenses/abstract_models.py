@@ -115,12 +115,15 @@ class HLDefenseModel(ABC):
         """
         pass
 
-    def __call__(self, batch: torch.Tensor) -> list:
+    def __call__(self, batch: torch.Tensor, preds_only: bool = True) -> list:
         """
         :param batch: image tensor of shape (B C H W)
-        :return un-normalized predictions of shape (B, N_CLASSES), computed on:
-            1. the original images
-            2. the reconstructed and re-sampled images
+        :return if preds only:
+                un-normalized predictions of shape (B, N_CLASSES), computed on the cleaned images.
+                else:
+                1. un-normalized predictions of shape (B, N_CLASSES), computed on the original images.
+                2. un-normalized predictions of shape (B, N_CLASSES), computed on the cleaned images.
+                3. the batch of cleaned images (B, C, H, W)
         """
 
         # preprocessing before autoencoding
@@ -140,4 +143,7 @@ class HLDefenseModel(ABC):
         preds_clean = self.classifier(batch)
         preds_new_recons = self.classifier(new_recons)
 
-        return preds_clean, preds_new_recons
+        if preds_only:
+            return preds_new_recons
+
+        return preds_clean, preds_new_recons, new_recons

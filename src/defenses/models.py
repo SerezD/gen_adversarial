@@ -1,7 +1,8 @@
 import math
 from argparse import Namespace
 
-from kornia.augmentation import Normalize
+from einops import rearrange
+from kornia.augmentation import Normalize, Denormalize
 from kornia.augmentation.container import AugmentationSequential
 import torch
 from torch import nn
@@ -25,9 +26,12 @@ class Cifar10VGGModel(BaseClassificationModel):
         """
 
         # takes normalized images.
+        self.mean = [0.507, 0.4865, 0.4409]
+        self.std = [0.2673, 0.2564, 0.2761]
+
         preprocessing = AugmentationSequential(
-            Normalize(mean=torch.tensor([0.507, 0.4865, 0.4409], device=device),
-                      std=torch.tensor([0.2673, 0.2564, 0.2761], device=device))
+            Normalize(mean=torch.tensor(self.mean, device=device),
+                      std=torch.tensor(self.std, device=device))
         )
 
         super().__init__(model_path, device, preprocessing)
@@ -52,9 +56,12 @@ class Cifar10ResnetModel(BaseClassificationModel):
         """
 
         # takes normalized images.
+        self.mean = [0.507, 0.4865, 0.4409]
+        self.std = [0.2673, 0.2564, 0.2761]
+
         preprocessing = AugmentationSequential(
-            Normalize(mean=torch.tensor([0.507, 0.4865, 0.4409], device=device),
-                      std=torch.tensor([0.2673, 0.2564, 0.2761], device=device))
+            Normalize(mean=torch.tensor(self.mean, device=device),
+                      std=torch.tensor(self.std, device=device))
         )
 
         super().__init__(model_path, device, preprocessing)
@@ -78,8 +85,15 @@ class CelebAResnetModel(BaseClassificationModel):
         Wrapper for the CelebA-HQ Gender Resnet-50 custom model.
         """
 
-        # no preprocessing needed.
-        super().__init__(model_path, device)
+        self.mean = [0.5, 0.5, 0.5]
+        self.std = [0.5, 0.5, 0.5]
+
+        preprocessing = AugmentationSequential(
+            Normalize(mean=torch.tensor(self.mean, device=device),
+                      std=torch.tensor(self.std, device=device))
+        )
+
+        super().__init__(model_path, device, preprocessing=preprocessing)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -95,7 +109,7 @@ class CelebAResnetModel(BaseClassificationModel):
         return resnet
 
 
-class Cifar10NVAEDefenseModel(HLDefenseModel):
+class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
                  resample_from: int, temperature: float = 1.0):
@@ -171,11 +185,11 @@ class Cifar10NVAEDefenseModel(HLDefenseModel):
             reshaped_codes.append(c.reshape(b, d, r, r))
 
         logits = self.autoencoder.decode(reshaped_codes)
-        recons = DiscMixLogistic(logits).mean()
+        recons = DiscMixLogistic(logits).sample(self.temperature)
         return recons
 
 
-class CelebAStyleGanDefenseModel(HLDefenseModel):
+class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str, device: str, resample_from: int):
         """
@@ -217,9 +231,9 @@ class CelebAStyleGanDefenseModel(HLDefenseModel):
         """
         codes = self.autoencoder.encode(batch)
 
-        # TODO verify this is needed.
         b, _, _, _ = batch.shape
-        codes = [c.view(b, -1) for c in codes]
+        codes = rearrange(codes, 'b n d -> n b d')
+        codes = [c for c in codes]
 
         return codes
 
@@ -229,8 +243,16 @@ class CelebAStyleGanDefenseModel(HLDefenseModel):
         :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
         :return: list of codes of the same shape, where some of them have been re-sampled.
         """
-        # TODO need to sample from gaussian of the correct shape, then pass to MLP
-        return codes
+        n_codes = len(codes)
+        b, d = codes[0].shape
+        device = codes[0].device
+
+        # sample gaussian noise, then get new styles by mixing with codes.
+        noises = torch.normal(0, 1, (n_codes, b, d), device=device)
+        styles = [self.autoencoder.decoder.style(n) for n in noises]
+        styles = codes[:self.resample_from] + styles[self.resample_from:]
+
+        return styles
 
     def decode(self, codes: list) -> list:
         """
@@ -239,5 +261,16 @@ class CelebAStyleGanDefenseModel(HLDefenseModel):
         :return: batch of images of shape (B, C, H, W).
         """
 
-        # TODO, verify chunks are passed in the correct format.
-        return self.autoencoder.decode(codes)
+        # put codes in the correct shape
+        codes = rearrange(torch.stack(codes), 'n b d -> b n d')
+
+        # decode and de-normalize
+        reconstructions = self.autoencoder.decode(codes)
+        device = reconstructions.device
+
+        reconstructions = Denormalize(
+            mean=torch.tensor([0.5, 0.5, 0.5], device=device),
+            std=torch.tensor([0.5, 0.5, 0.5], device=device)
+        )(reconstructions)
+
+        return reconstructions
