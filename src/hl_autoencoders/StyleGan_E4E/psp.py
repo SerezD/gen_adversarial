@@ -97,6 +97,12 @@ class pSp(nn.Module):
 
         return codes
 
+    def get_codes(self, x: torch.Tensor):
+
+        codes = self.encode(x)
+        codes = [c for c in codes.permute(1, 0, 2)]
+        return codes
+
     def decode(self, codes: torch.Tensor):
         """
         get latents of shape B, NLATENTS, DIM and decode images
