@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from kornia.augmentation.container import AugmentationSequential
+from kornia.enhance import normalize, denormalize
 import torch
 from torch import nn
 
@@ -10,19 +10,26 @@ Contains the abstract models for defense.
 
 class BaseClassificationModel(ABC):
 
-    def __init__(self, model_path: str, device: str, preprocessing: AugmentationSequential = None):
+    def __init__(self, model_path: str, device: str, mean: tuple = None, std: tuple = None):
         """
         Model containing only a base (pre-trained) classifier, with no additional defenses.
         Useful to compute stuff like clean accuracy or test performances of different attacks.
 
         :param model_path: absolute path to the pretrained model.
         :param device: cuda device (or cpu) to load the model on
-        :param preprocessing: kornia AugmentationSequential object to preprocess each batch before classification.
+        :param mean: optional param for Normalization.
+        :param std: optional param for Normalization.
         """
 
         super().__init__()
 
-        self.preprocessing = preprocessing.to(device) if preprocessing is not None else None
+        if (mean is not None and std is None) or (mean is None and std is not None):
+            raise ValueError("to apply Normalization, please specify both mean and std.")
+
+        self.mean = mean
+        self.std = std
+        self.preprocess = self.mean is not None
+
         self.classifier = self.load_classifier(model_path, device)
 
     @abstractmethod
@@ -40,7 +47,6 @@ class BaseClassificationModel(ABC):
         :param device: device to move the classifier on
         """
         self.classifier = self.classifier.to(device)
-        self.preprocessing = self.preprocessing.to(device) if self.preprocessing is not None else None
 
     def __call__(self, batch: torch.Tensor) -> torch.Tensor:
         """
@@ -48,25 +54,26 @@ class BaseClassificationModel(ABC):
         :return un-normalized predictions of shape (B N_CLASSES)
         """
 
-        if self.preprocessing is not None:
-            batch = self.preprocessing(batch)
+        if self.preprocess:
+            batch = normalize(batch, self.mean, self.std)
 
         return self.classifier(batch)
 
 
 class HLDefenseModel(ABC):
 
-    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
-                 autoencoder_preprocessing: AugmentationSequential = None):
+    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, resample_from: int,
+                 device: str, mean: tuple = None, std: tuple = None):
         """
         Model composed of HL-Autoencoder + CNN.
         The autoencoder is used to pre-process the input samples.
 
         :param classifier: pretrained classification model.
         :param autoencoder_path: absolute path to the pretrained autoencoder.
+        :param resample_from: latent scale from where codes start to be resampled for purification.
         :param device: cuda device (or cpu) to load both ae and classifier on
-        :param autoencoder_preprocessing: kornia AugmentationSequential object to preprocess each batch before
-                                          auto encoding it.
+        :param mean: optional param for Normalization and Denormalization operations.
+        :param std: optional param for Normalization and Denormalization operations.
         """
 
         super().__init__()
@@ -74,8 +81,15 @@ class HLDefenseModel(ABC):
         self.classifier = classifier
         self.classifier.set_device(device)
 
-        self.preprocessing = autoencoder_preprocessing.to(device) if autoencoder_preprocessing is not None else None
+        if (mean is not None and std is None) or (mean is None and std is not None):
+            raise ValueError("to apply Normalization/Denormalization, please specify both mean and std.")
 
+        self.mean = mean
+        self.std = std
+        self.preprocess = self.mean is not None
+        self.postprocess = self.mean is not None
+
+        self.resample_from = resample_from
         self.autoencoder = self.load_autoencoder(autoencoder_path, device)
 
     @abstractmethod
@@ -119,31 +133,33 @@ class HLDefenseModel(ABC):
         """
         :param batch: image tensor of shape (B C H W)
         :return if preds only:
-                un-normalized predictions of shape (B, N_CLASSES), computed on the cleaned images.
+                un-normalized predictions of shape (B, N_CLASSES), computed on the purified images.
                 else:
-                1. un-normalized predictions of shape (B, N_CLASSES), computed on the original images.
-                2. un-normalized predictions of shape (B, N_CLASSES), computed on the cleaned images.
-                3. the batch of cleaned images (B, C, H, W)
+                1. un-normalized predictions of shape (B, N_CLASSES), computed on the purified images.
+                2. the batch of purified images (B, C, H, W)
         """
 
         # preprocessing before autoencoding
-        if self.preprocessing is not None:
-            batch = self.preprocessing(batch)
+        if self.preprocess:
+            batch = normalize(batch, torch.tensor(self.mean), torch.tensor(self.std))
 
         # extract codes (encoding)
         original_codes = self.get_codes(batch)
 
         # re-sample some codes
-        new_codes = self.sample_codes(original_codes)
+        purified_codes = self.sample_codes(original_codes)
 
         # decode
-        new_recons = self.decode(new_codes)
+        purified_recons = self.decode(purified_codes)
+
+        # denormalize before predicting
+        if self.postprocess:
+            purified_recons = denormalize(purified_recons, torch.tensor(self.mean), torch.tensor(self.std))
 
         # forward for final classification
-        preds_clean = self.classifier(batch)
-        preds_new_recons = self.classifier(new_recons)
+        preds_purified = self.classifier(purified_recons)
 
         if preds_only:
-            return preds_new_recons
+            return preds_purified
 
-        return preds_clean, preds_new_recons, new_recons
+        return preds_purified, purified_recons

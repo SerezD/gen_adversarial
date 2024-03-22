@@ -25,16 +25,9 @@ class Cifar10VGGModel(BaseClassificationModel):
         Wrapper for the Cifar10 Vgg-16 model downloaded from torch hub.
         """
 
-        # takes normalized images.
-        self.mean = [0.507, 0.4865, 0.4409]
-        self.std = [0.2673, 0.2564, 0.2761]
-
-        preprocessing = AugmentationSequential(
-            Normalize(mean=torch.tensor(self.mean, device=device),
-                      std=torch.tensor(self.std, device=device))
-        )
-
-        super().__init__(model_path, device, preprocessing)
+        mean = (0.5070, 0.4865, 0.4409)
+        std = (0.2673, 0.2564, 0.2761)
+        super().__init__(model_path, device, mean, std)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -55,16 +48,9 @@ class Cifar10ResnetModel(BaseClassificationModel):
         Wrapper for the Cifar10 Resnet-32 model downloaded from torch hub.
         """
 
-        # takes normalized images.
-        self.mean = [0.507, 0.4865, 0.4409]
-        self.std = [0.2673, 0.2564, 0.2761]
-
-        preprocessing = AugmentationSequential(
-            Normalize(mean=torch.tensor(self.mean, device=device),
-                      std=torch.tensor(self.std, device=device))
-        )
-
-        super().__init__(model_path, device, preprocessing)
+        mean = (0.5070, 0.4865, 0.4409)
+        std = (0.2673, 0.2564, 0.2761)
+        super().__init__(model_path, device, mean, std)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -85,15 +71,9 @@ class CelebAResnetModel(BaseClassificationModel):
         Wrapper for the CelebA-HQ Gender Resnet-50 custom model.
         """
 
-        self.mean = [0.5, 0.5, 0.5]
-        self.std = [0.5, 0.5, 0.5]
-
-        preprocessing = AugmentationSequential(
-            Normalize(mean=torch.tensor(self.mean, device=device),
-                      std=torch.tensor(self.std, device=device))
-        )
-
-        super().__init__(model_path, device, preprocessing=preprocessing)
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
+        super().__init__(model_path, device, mean, std)
 
     def load_classifier(self, model_path: str, device: str) -> nn.Module:
         """
@@ -125,9 +105,8 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
             "invalid classifier passed to Cifar10NVAEDefenseModel"
 
         # no need for preprocessing, since it is done directly in NVAE forward pass.
-        super().__init__(classifier, autoencoder_path, device)
+        super().__init__(classifier, autoencoder_path, resample_from, device)
 
-        self.resample_from = resample_from
         self.temperature = temperature
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
@@ -196,14 +175,10 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         Defense model using an StyleGan pretrained on FFHQ.
         """
 
-        # takes preprocessed images
-        preprocessing = AugmentationSequential(
-            Normalize(mean=torch.tensor([0.5, 0.5, 0.5], device=device),
-                      std=torch.tensor([0.5, 0.5, 0.5], device=device))
-        )
-        super().__init__(classifier, autoencoder_path, device, preprocessing)
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
 
-        self.resample_from = resample_from
+        super().__init__(classifier, autoencoder_path, resample_from, device, mean, std)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
@@ -266,11 +241,5 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
         # decode and de-normalize
         reconstructions = self.autoencoder.decode(codes)
-        device = reconstructions.device
-
-        reconstructions = Denormalize(
-            mean=torch.tensor([0.5, 0.5, 0.5], device=device),
-            std=torch.tensor([0.5, 0.5, 0.5], device=device)
-        )(reconstructions)
 
         return reconstructions

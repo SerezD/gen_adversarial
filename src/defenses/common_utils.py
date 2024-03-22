@@ -3,8 +3,8 @@ from argparse import Namespace
 
 import torch
 
-from src.hl_generative_models.NVAE.mine.model import AutoEncoder
-from src.hl_generative_models.StyleGan_E4E.psp import pSp
+from src.hl_autoencoders.NVAE.mine.model import AutoEncoder
+from src.hl_autoencoders.StyleGan_E4E.psp import pSp
 from src.classifier.model import ResNet
 
 
