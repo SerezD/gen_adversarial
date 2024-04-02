@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 import torch
+from einops import pack
 from torch.cuda.amp import autocast
 from torchvision.utils import make_grid
 
@@ -13,10 +14,10 @@ from robustbench import load_cifar10
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
-from src.hl_generative_models.NVAE.mine.model import AutoEncoder as NVAE
-from src.hl_generative_models.NVAE.original.model import AutoEncoder
-from src.hl_generative_models.NVAE.original.utils import get_arch_cells
+from src.hl_autoencoders.NVAE.mine.distributions import DiscMixLogistic
+from src.hl_autoencoders.NVAE.mine.model import AutoEncoder as NVAE
+from src.hl_autoencoders.NVAE.original.model import AutoEncoder
+from src.hl_autoencoders.NVAE.original.utils import get_arch_cells
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
@@ -71,7 +72,8 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
         # create model and move it to GPU with id rank
         nvae = NVAE(config['autoencoder'], config['resolution'])
 
-        nvae.load_state_dict(checkpoint['state_dict'])
+        nvae.load_state_dict(checkpoint['state_dict_adjusted'])
+        # nvae.load_state_dict(checkpoint['state_dict'])
         nvae.to(f'cuda:{rank}').eval()
 
     else:
@@ -97,38 +99,38 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
     with torch.no_grad():
 
-        # # TEST L2 ERROR
-        # print(f'[INFO] reconstructing...')
-        # recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
-        #
-        # for b in tqdm(range(0, data_n, batch_size)):
-        #
-        #     batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
-        #
-        #     # reconstruct cifar10 test set
-        #     if IS_OURS:
-        #         logits = nvae.autoencode(batch_x, deterministic=True)
-        #         batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
-        #     else:
-        #         logits = nvae.decode(nvae.encode_deterministic(batch_x))
-        #         decoder = nvae.decoder_output(logits)
-        #         batch_recons = decoder.mean()
-        #
-        #     recons, _ = pack([recons, batch_recons], '* c h w')
-        #
-        # # L2 error:
-        # l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
-        # print(f"L2 Error: {l2:.5f}")
+        # TEST L2 ERROR
+        print(f'[INFO] reconstructing...')
+        recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
 
-        print(f'[INFO] adjusting batch norm...')
-        nvae.train()
-        with autocast():
-            for _ in tqdm(range(500)):
-                if IS_OURS:
-                    nvae.sample(batch_size, temperature, f'cuda:{rank}')
-                else:
-                    nvae.sample(batch_size, temperature)
-            nvae.eval()
+        for b in tqdm(range(0, data_n, batch_size)):
+
+            batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
+
+            # reconstruct cifar10 test set
+            if IS_OURS:
+                logits = nvae.autoencode(batch_x, deterministic=True)
+                batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
+            else:
+                logits = nvae.decode(nvae.encode_deterministic(batch_x))
+                decoder = nvae.decoder_output(logits)
+                batch_recons = decoder.mean()
+
+            recons, _ = pack([recons, batch_recons], '* c h w')
+
+        # L2 error:
+        l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
+        print(f"L2 Error: {l2:.5f}")
+        #
+        # print(f'[INFO] adjusting batch norm...')
+        # nvae.train()
+        # with autocast():
+        #     for _ in tqdm(range(500)):
+        #         if IS_OURS:
+        #             nvae.sample(batch_size, temperature, f'cuda:{rank}')
+        #         else:
+        #             nvae.sample(batch_size, temperature)
+        #     nvae.eval()
 
         # SAMPLING
         print(f'[INFO] sampling...')
@@ -190,36 +192,60 @@ if __name__ == '__main__':
     FID Score:  63.0407
     IS Score:   4.7530 +- 0.1479
     
-    [3SCALES_1GROUP THEIRS LAST_HOPE]
-    L2 Error: 0.53891
-    FID score: 69.3384
-    IS score: 4.3928 +- 0.0846
-
-    [3SCALES_1GROUP OURS]
-    L2 Error: 0.43765
-    FID score: 68.6585
-    IS score: 4.4300 +- 0.1343
+    *****************************************
     
-    [3SCALES_1GROUP OURS LR 5e-3]
-    L2 Error: 0.46756
-    FID score: 67.3999
-    IS score: 4.6006 +- 0.0596
+    [3SCALES_4GROUPS REFACTORED EPOCH=550]
+    L2 Error:   0.66466
+    TEMP 0.9 + BN
+        FID Score:  57.7157
+        IS Score:   5.3854 +- 0.1261
     
-    [3SCALES_1GROUP OURS TORCH OPTIM]
-    L2 Error: 0.49118
-    FID score: 69.9991
-    IS score: 4.5002 +- 0.0925
+    *****************************************
     
-    [3SCALES_1GROUP OURS NO BALANCE Const]
-    L2 Error: 0.45747
-    FID score: 70.1032
-    IS score: 4.5645 +- 0.1347
+    [3SCALES_4GROUPS REGULARIZED EPOCH=240]
+    L2 Error:   0.65472
+    TEMP 0.9 + BN
+        FID Score:  55.3527
+        IS Score:   5.5839 +- 0.1364
+        
+    [3SCALES_4GROUPS REGULARIZED EPOCH=740]
+    L2 Error:       0.65742
+    L2 Error + BN:  0.78822
+    TEMP 0.9 + BN
+        FID Score:  59.3770
+        IS Score:   5.3409 +- 0.1598
     
-    [3SCALES_1GROUP OURS NO KL Const]
-    L2 Error: 0.47728
-    FID score: 67.3362
-    IS score: 4.6309 +- 0.0779
+    *****************************************
+        
+    [3SCALES_4GROUPS LARGE EPOCH=150]
+    L2 Error + BN:  1.59764
+    TEMP 1.0 + BN
+        FID score: 69.1920
+        IS score: 4.8104 +- 0.0967   
+        
+    [3SCALES_4GROUPS LARGE EPOCH=200]
+    L2 Error + BN:  1.61708
+    TEMP 1.0 + BN
+        FID score: 58.2675
+        IS score:  5.2815 +- 0.1459
+        
+    [3SCALES_4GROUPS LARGE EPOCH=300]
+    L2 Error + BN:  1.24334
+    TEMP 1.0 + BN
+        FID score: 54.6733
+        IS score:  5.5553 +- 0.1120
     
+    [3SCALES_4GROUPS LARGE EPOCH=350]
+    L2 Error + BN:  1.32193
+    TEMP 1.0 + BN   
+        FID score:  54.2549
+        IS score:   5.6653 +- 0.1226
+        
+    [3SCALES_4GROUPS LARGE EPOCH=399]
+    L2 Error + BN:  1.36773
+    TEMP 1.0 + BN
+        FID score: 54.1824
+        IS score:  5.6279 +- 0.1761
     """
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
@@ -227,13 +253,14 @@ if __name__ == '__main__':
     IS_OURS = True
 
     if IS_OURS:
-        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/3scales_4groups.pt'
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/4x3_large/epoch=350.pt'
+
     else:
         CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/last_hope.pt'
 
     # main(0, 0.8, IS_OURS, CKPT_NVAE, DATA_PATH)
     try:
-        mp.spawn(main, args=(0.9, IS_OURS, CKPT_NVAE, DATA_PATH), nprocs=1)
+        mp.spawn(main, args=(1.0, IS_OURS, CKPT_NVAE, DATA_PATH), nprocs=1)
     except KeyboardInterrupt as k:
         dist.destroy_process_group()
         raise k

@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from src.hl_generative_models.NVAE.original.utils import one_hot
+from src.hl_autoencoders.NVAE.original.utils import one_hot
 
 @torch.jit.script
 def soft_clamp5(x: torch.Tensor):

@@ -21,6 +21,7 @@ def normalize_weight(log_weight_norm: nn.Parameter, weight: nn.Parameter) -> nn.
 class Conv2D(nn.Conv2d):
     """
     Custom implementation with weight normalization.
+    TODO replace with native torch
     """
 
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1,
@@ -173,20 +174,22 @@ class SkipDown(nn.Module):
 
         # each conv reduces to 1/4 of the channels
         # TODO try to replace this with a normal convolution and see what happens...
-        self.conv_1 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
-        self.conv_2 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
-        self.conv_3 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
-        self.conv_4 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        # self.conv_1 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        # self.conv_2 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        # self.conv_3 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        # self.conv_4 = Conv2D(in_channels, out_channels // 4, kernel_size=1, stride=stride, bias=True, weight_norm=True)
+        self.conv = Conv2D(in_channels, out_channels, kernel_size=1, stride=stride, bias=True, weight_norm=True)
 
     def forward(self, x):
         out = torch.nn.functional.silu(x)
 
-        conv1 = self.conv_1(out)
-        conv2 = self.conv_2(out[:, :, 1:, 1:])
-        conv3 = self.conv_3(out[:, :, :, 1:])
-        conv4 = self.conv_4(out[:, :, 1:, :])
-
-        out = torch.cat([conv1, conv2, conv3, conv4], dim=1)
+        # conv1 = self.conv_1(out)
+        # conv2 = self.conv_2(out[:, :, 1:, 1:])
+        # conv3 = self.conv_3(out[:, :, :, 1:])
+        # conv4 = self.conv_4(out[:, :, 1:, :])
+        #
+        # out = torch.cat([conv1, conv2, conv3, conv4], dim=1)
+        out = self.conv(out)
 
         return out
 

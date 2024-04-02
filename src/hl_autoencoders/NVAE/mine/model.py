@@ -1,7 +1,7 @@
 import math
 from collections import OrderedDict
 
-from einops import pack
+from einops import pack, rearrange, einsum
 
 import torch
 from torch import nn
@@ -82,6 +82,11 @@ class AutoEncoder(nn.Module):
 
         # compute values for spectral and batch norm regularization
         self._count_conv_and_batch_norm_layers()
+
+        # left/right singular vectors used for estimating the largest singular values of each weight.
+        self.sr_u = {}
+        self.sr_v = {}
+        self.num_power_iter = 4  # number of iterations for estimating each u and v.
 
     def _init_preprocessing(self):
         """
@@ -303,73 +308,125 @@ class AutoEncoder(nn.Module):
 
     def _count_conv_and_batch_norm_layers(self):
         """
-        collect all norm params in Conv2D and gamma param in batch norm for training regularization
+        Save all BN and Conv2D layers for quick access during BN and Spectral Regularization
         """
 
-        self.all_log_norm = []
         self.all_conv_layers = []
         self.all_bn_layers = []
 
         for n, layer in self.named_modules():
 
             if isinstance(layer, Conv2D) or isinstance(layer, ARConv2d):
-                self.all_log_norm.append(layer.log_weight_norm)
                 self.all_conv_layers.append(layer)
 
-            if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, nn.SyncBatchNorm):
+            if isinstance(layer, nn.SyncBatchNorm):
                 self.all_bn_layers.append(layer)
 
-        # left/right singular vectors used for SR
-        self.sr_u = {}
-        self.sr_v = {}
-        self.num_power_iter = 4
-
-    def spectral_norm_parallel(self):
+    def compute_sr_loss(self):
         """
-        This method computes spectral normalization for all conv layers in parallel.
-        This method should be called after calling the forward method of all the conv layers in each iteration.
-        Will be multiplied by λ coefficient
+        From Section 3.2 of NVAE paper:
+            "To bound KL, we need to ensure that the encoder output does not change dramatically as its input changes.
+            This notion of smoothness is characterized by the Lipschitz constant. We hypothesise that by regularizing
+            the Lipschitz constant we can ensure that the latent codes predicted by the encoder remain bounded,
+            resulting in stable KL minimization"
+
+        What is the Lipschitz constant ?
+            https://en.wikipedia.org/wiki/Lipschitz_continuity
+            Intuitively, by regularizing the Lipschitz constant we ensure that the Encoder is continuous,
+            avoiding large KL terms in the loss.
+
+        Note -> in the code, SR is applied to both Encoder and Decoder, as the authors hypothesise that:
+                "a sharp Decoder may require a sharp Encoder, causing more instability in training."
+                Appendix A, annealing lambda.
+
+        How to regularize the Lipschitz constant ?
+            The idea comes from this paper: https://arxiv.org/pdf/1802.05957.pdf
+            In Section 2.1, given Wl the weight matrix of Layer l and al the activation function of layer l, if
+            the Lipschitz Norm of al is 1, then the Lipschitz norm ||f||Lp of the function f (e.g. the Encoder), can be
+            bounded as:
+                ||f||Lp <= PROD_{l=1}^L \sigma(Wl)   (Equation 7 of the paper).
+
+            About the Lipschitz Norm:
+            https://math.stackexchange.com/questions/2692579/is-lipschitz-norm-the-other-name-for-lipschitz-constant
+
+            What is \sigma(Wl) ? It is the Spectral Norm of matrix Wl, equal to its largest singular value.
+            https://math.stackexchange.com/questions/188202/meaning-of-the-spectral-norm-of-a-matrix#:~:text=The%20spectral%20norm%20(also%20know,can%20'stretch'%20a%20vector.
+
+            Going back to Section 3.2 of NVAE paper:
+            "Formally, we add the term Lsr = \lambda SUM_i si, where si is the largest singular value of the ith
+            convolutional layer".
+
+        How to estimate the singular values ?
+            Since computing the singular values of a matrix can be computationally demanding, they use
+            "power iteration method" (check section 3.2 and Appendix A of https://arxiv.org/pdf/1802.05957.pdf).
+
+            The idea:
+                1. \sigma(W) can be approximated by u^T W v,
+                    where u and v are the first left and right singular vectors.
+                2. u and v can be estimated with the iterative procedure:
+                    for i in num_iterations:
+                        u = norm_2( W v)
+                        v = norm_2(u^T W)
+                3. the initialization for u and v is uniform.
+
         """
 
-        weights = {}  # a dictionary indexed by the shape of weights
-        for l in self.all_conv_layers:
-            weight = l.weight_normalized
-            weight_mat = weight.view(weight.size(0), -1)
-            if weight_mat.shape not in weights:
-                weights[weight_mat.shape] = []
+        # get all convolutional weights by shape.
+        weights = {}
+        for w in self.all_conv_layers:
+            # TODO change this if we change normalization of convs!
+            weight = rearrange(w.weight_normalized, 'c x y z -> c (x y z)')
+            if weight.shape not in weights:
+                weights[weight.shape] = []
 
-            weights[weight_mat.shape].append(weight_mat)
+            weights[weight.shape].append(weight)
 
-        loss = 0
-        for i in weights:
-            weights[i] = torch.stack(weights[i], dim=0)
+        # compute sr_loss for each weight
+        sr_loss = 0
+        for k, w in weights.items():
+
+            # weights having the same shape can be processed together to fasten computation.
+            w = torch.stack(w, dim=0)
+
             with torch.no_grad():
+
+                # how many iterative updates to u, v
                 num_iter = self.num_power_iter
-                if i not in self.sr_u:
-                    num_w, row, col = weights[i].shape
-                    self.sr_u[i] = nn.functional.normalize(
-                        torch.ones((num_w, row), device=weights[i].device).normal_(0, 1),
-                        dim=1, eps=1e-3)
 
-                    self.sr_v[i] = nn.functional.normalize(
-                        torch.ones((num_w, col), device=weights[i].device).normal_(0, 1),
-                        dim=1, eps=1e-3)
+                # first time (initialization of u and v according to uniform distribution)
+                if k not in self.sr_u:
 
-                    # increase the number of iterations for the first time
+                    # increase the number of iterations for the first time only
                     num_iter = 10 * self.num_power_iter
 
-                for j in range(num_iter):
-                    # Spectral norm of weight equals to `u^T W v`, where `u` and `v`
-                    # are the first left and right singular vectors.
-                    # This power iteration produces approximations of `u` and `v`.
-                    self.sr_v[i] = nn.functional.normalize(
-                        torch.matmul(self.sr_u[i].unsqueeze(1), weights[i]).squeeze(1), dim=1, eps=1e-3)
-                    self.sr_u[i] = nn.functional.normalize(
-                        torch.matmul(weights[i], self.sr_v[i].unsqueeze(2)).squeeze(2), dim=1, eps=1e-3)
+                    # initialize u with same rows as w
+                    self.sr_u[k] = nn.functional.normalize(
+                        torch.ones_like(w)[:, :, 0].normal_(0, 1),
+                        dim=1, eps=1e-3)
 
-            sigma = torch.matmul(self.sr_u[i].unsqueeze(1), torch.matmul(weights[i], self.sr_v[i].unsqueeze(2)))
-            loss += torch.sum(sigma)
-        return loss
+                    # initialize v with same rows as w
+                    self.sr_v[k] = nn.functional.normalize(
+                        torch.ones_like(w)[:, 0, :].normal_(0, 1),
+                        dim=1, eps=1e-3)
+
+                # update u, v iteratively
+                for j in range(num_iter):
+
+                    # v = norm_2(u^T W)
+                    self.sr_v[k] = nn.functional.normalize(
+                        einsum(self.sr_u[k], w, 'n r, n r c -> n c'),
+                        dim=1, eps=1e-3)
+
+                    # u = norm_2( W v)
+                    self.sr_u[k] = nn.functional.normalize(
+                        einsum(w, self.sr_v[k], 'n r c, n c -> n r'),
+                        dim=1, eps=1e-3)
+
+            # sigma of all weights with this shape = uT w v
+            sigma = einsum(self.sr_u[k], w, self.sr_v[k], 'n r, n r c, n c -> n')
+            sr_loss += torch.sum(sigma)  # sum on n
+
+        return sr_loss
 
     def batch_norm_loss(self):
         """
@@ -658,6 +715,11 @@ class AutoEncoder(nn.Module):
 
         return chunks
 
+    def get_codes(self, x: torch.Tensor):
+        codes = self.encode(x, deterministic=True)
+        codes = [c.view(x.shape[0], -1) for c in codes]
+        return codes
+
     def decode(self, chunks: list):
 
         chunks = chunks.copy()
@@ -762,8 +824,8 @@ class AutoEncoder(nn.Module):
 
                         # sample z_i
                         dist = Normal(mu_p, log_sig_p, temp=temperature)
-                        # z_i, _ = dist.sample()
-                        z_i = dist.mu  # Best to take mean
+                        z_i, _ = dist.sample()
+                        # z_i = dist.mu  # better to take mean
 
                     # apply NF
                     if self.use_nf:

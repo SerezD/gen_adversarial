@@ -21,9 +21,9 @@ from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip
 from tqdm import tqdm
 
 from data.loading_utils import ffcv_loader
-from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
-from src.hl_generative_models.NVAE.mine.model import AutoEncoder
-from src.hl_generative_models.NVAE.mine.utils import kl_balancer
+from src.hl_autoencoders.NVAE.mine.distributions import DiscMixLogistic
+from src.hl_autoencoders.NVAE.mine.model import AutoEncoder
+from src.hl_autoencoders.NVAE.mine.utils import kl_balancer
 
 
 def parse_args():
@@ -82,20 +82,21 @@ def get_model_conf(filepath: str):
     return params
 
 
-def setup(rank: int, world_size: int, train_conf: dict):
+def setup(train_conf: dict):
 
     if 'MASTER_ADDR' not in os.environ:
         os.environ["MASTER_ADDR"] = "localhost"
-        if rank == 0:
+        if WORLD_RANK == 0:
             warnings.warn("ENV VARIABLE 'MASTER_ADDR' not specified. Setting 'MASTER_ADDR'='localhost'")
 
     if 'MASTER_PORT' not in os.environ:
         os.environ["MASTER_PORT"] = "29500"
-        if rank == 0:
+        if WORLD_RANK == 0:
             warnings.warn("ENV VARIABLE 'MASTER_PORT' not specified. 'MASTER_PORT'='29500'")
 
     # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # Note: passing rank and work_size to maintain compatibility with non torch run scripts
+    dist.init_process_group("nccl", rank=WORLD_RANK, world_size=WORLD_SIZE)
 
     # ensures that weight initializations are all the same
     torch.manual_seed(train_conf['seed'])
@@ -131,7 +132,7 @@ def prepare_data(rank: int, world_size: int, data_dir: str, conf: dict):
 
 def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
                 model: AutoEncoder, optimizer: torch.optim.Optimizer, scheduler: Any,
-                grad_scalar: GradScaler, kl_params: dict, sr_params: dict,
+                grad_scaler: GradScaler, kl_params: dict, sr_params: dict,
                 total_training_steps: int, global_step: int, run: wandb.run = None):
     """
     :param dataloader: train dataloader.
@@ -139,7 +140,7 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
     :param model: model in training mode. Remember to pass ".module" with DDP.
     :param optimizer: optimizer object from torch.optim.Optimizer.
     :param scheduler: scheduler object from scheduling utils.
-    :param grad_scalar: for AMP mode.
+    :param grad_scaler: for AMP mode.
     :param kl_params: parameters for kl annealing coefficients.
     :param sr_params: spectral regularization parameters for lambda computation
     :param total_training_steps: total training steps on all epochs.
@@ -195,13 +196,29 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
                 lambda_coeff = float(sr_params["weight_decay_norm"])
 
             # add spectral regularization and batch norm regularization terms to loss
-            spectral_norm_term = model.spectral_norm_parallel()
+            spectral_norm_term = model.compute_sr_loss()
             batch_norm_term = model.batch_norm_loss()
             loss += lambda_coeff * spectral_norm_term + lambda_coeff * batch_norm_term
 
-        grad_scalar.scale(loss).backward()
-        grad_scalar.step(optimizer)
-        grad_scalar.update()
+        grad_scaler.scale(loss).backward()
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
+
+        # TODO TEST
+        # flag = False
+        # count = 0
+        # for n, p in model.named_parameters():
+        #     a = p.detach().clone()
+        #     dist.all_reduce(p.data, op=dist.ReduceOp.SUM)
+        #     p.data /= WORLD_SIZE
+        #     if (a.data - p.data).sum().item() > 0:
+        #         flag = True
+        #         count += 1
+        #         if count == 1:
+        #             print(f"AFTER BACKWARD: {n} is different across ranks!")
+        #             print(f"SUM OF DIFFERENCES: {(a.data - p.data).sum().item()}")
+        # if flag:
+        #     raise RuntimeError(f"AFTER BACKWARD: {count} parameters diverge!")
 
         # to log at each step
         dist.all_reduce(kl_gammas, op=dist.ReduceOp.SUM)
@@ -279,9 +296,10 @@ def epoch_validation(dataloader: DataLoader, model: AutoEncoder, global_step: in
         epoch_losses, _ = pack([epoch_losses, losses], '* n')
 
     # log epoch loss
-    if WORLD_RANK == 0:
+    epoch_losses = torch.mean(epoch_losses, dim=0)
 
-        epoch_losses = torch.mean(epoch_losses, dim=0)
+    if WORLD_RANK == 0 and run is not None:
+
         run.log(
             {
                 "validation/loss": epoch_losses[0].item(),
@@ -307,13 +325,13 @@ def main(args: argparse.Namespace, config: dict):
 
     train_conf = config['training']
 
-    setup(WORLD_RANK, WORLD_SIZE, train_conf)
+    setup(train_conf)
 
     # Get data loaders.
     train_loader, val_loader, train_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args.data_path, config)
 
     # create model and move it to GPU with id rank
-    model = AutoEncoder(config['autoencoder'], config['resolution']).to(LOCAL_RANK)
+    model = AutoEncoder(config['autoencoder'], config['resolution'])
 
     # load checkpoint if resume
     if args.resume_from is not None:
@@ -321,16 +339,23 @@ def main(args: argparse.Namespace, config: dict):
         if WORLD_RANK == 0:
             print(f'[INFO] Loading checkpoint from: {args.resume_from}')
 
-        checkpoint = torch.load(args.resume_from, map_location=f'cuda:{LOCAL_RANK}')
+        checkpoint = torch.load(args.resume_from, map_location='cpu')
         model.load_state_dict(checkpoint['state_dict'])
+        model = model.to(LOCAL_RANK)
         global_step = checkpoint['global_step']
         init_epoch = checkpoint['epoch']
+        optimizer_state = checkpoint['optimizer']
+        grad_scaler_state = checkpoint['grad_scaler']
 
         if WORLD_RANK == 0:
             print(f'[INFO] Start from Epoch: {init_epoch} - Step: {global_step}')
 
     else:
         global_step, init_epoch = 0, 0
+        optimizer_state = None
+        grad_scaler_state = None
+
+        model = model.to(LOCAL_RANK)
 
         if WORLD_RANK == 0:
             print(summary(model, torch.zeros((1,) + tuple(config['resolution']), device=f'cuda:{LOCAL_RANK}'),
@@ -350,6 +375,8 @@ def main(args: argparse.Namespace, config: dict):
     ddp_model = DDP(model, device_ids=[LOCAL_RANK])
 
     optimizer = torch.optim.Adamax(ddp_model.parameters(), learning_rate, weight_decay=weight_decay, eps=eps)
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
 
     total_training_steps = len(train_loader) * train_conf['epochs']
     if train_conf['warmup_epochs'] is not None:
@@ -359,7 +386,9 @@ def main(args: argparse.Namespace, config: dict):
     else:
         scheduler = CosineScheduler(0, total_training_steps, learning_rate, min_learning_rate)
 
-    grad_scalar = GradScaler(2 ** 10)  # scale gradient for AMP
+    grad_scaler = GradScaler(2 ** 10)  # scale gradient for AMP
+    if grad_scaler_state is not None:
+        grad_scaler.load_state_dict(grad_scaler_state)
 
     for epoch in range(init_epoch, train_conf['epochs']):
 
@@ -370,8 +399,14 @@ def main(args: argparse.Namespace, config: dict):
         # Training
         ddp_model.train()
         global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, scheduler,
-                                  grad_scalar, train_conf["kl_anneal"], train_conf["spectral_regularization"],
+                                  grad_scaler, train_conf["kl_anneal"], train_conf["spectral_regularization"],
                                   total_training_steps, global_step, run)
+
+        # sync of all parameters
+        # TODO after refactor of weight norm check if still needed!
+        for p in ddp_model.module.parameters():
+            dist.all_reduce(p.data, op=dist.ReduceOp.SUM)
+            p.data /= WORLD_SIZE
 
         # Validation
         dist.barrier()
@@ -404,7 +439,7 @@ def main(args: argparse.Namespace, config: dict):
                     # log samples
                     for t in [0.7, 0.8, 0.9, 1.0]:
                         logits = ddp_model.module.sample(num_samples, t, device='cuda:0')
-                        samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample()
+                        samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample(t)
                         display = wandb.Image(make_grid(samples, nrow=num_samples))
                         run.log({f"media/samples tau={t:.2f}": display}, step=global_step)
 
@@ -414,11 +449,16 @@ def main(args: argparse.Namespace, config: dict):
             if WORLD_RANK == 0:
                 print(f'[INFO] Saving Checkpoint')
 
+                checkpoint_dict = {
+                    'epoch': epoch + 1,
+                    'global_step': global_step,
+                    'configuration': config,
+                    'state_dict': ddp_model.module.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'grad_scaler': grad_scaler.state_dict(),
+                }
                 ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/epoch={epoch:02d}.pt"
-                torch.save({'epoch': epoch + 1, 'global_step': global_step,
-                            'configuration': config,
-                            'state_dict': ddp_model.module.state_dict()},
-                           ckpt_file)
+                torch.save(checkpoint_dict, ckpt_file)
 
             dist.barrier()
 
@@ -427,11 +467,16 @@ def main(args: argparse.Namespace, config: dict):
 
         print(f'[INFO] Saving Checkpoint')
 
+        checkpoint_dict = {
+            'epoch': train_conf["epochs"],
+            'global_step': global_step,
+            'configuration': config,
+            'state_dict': ddp_model.module.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'grad_scaler': grad_scaler.state_dict()
+        }
         ckpt_file = f"{args.checkpoint_base_path}/{args.run_name}/last.pt"
-        torch.save({'epoch': train_conf["epochs"], 'global_step': global_step,
-                    'configuration': config,
-                    'state_dict': ddp_model.module.state_dict()},
-                   ckpt_file)
+        torch.save(checkpoint_dict, ckpt_file)
 
     cleanup()
 

@@ -9,14 +9,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.hl_generative_models.NVAE.original.neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
-from src.hl_generative_models.NVAE.original.neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
-from src.hl_generative_models.NVAE.original.neural_ar_operations import ELUConv as ARELUConv
+from src.hl_autoencoders.NVAE.original.neural_operations import OPS, EncCombinerCell, DecCombinerCell, Conv2D, get_skip_connection, SE
+from src.hl_autoencoders.NVAE.original.neural_ar_operations import ARConv2d, ARInvertedResidual, MixLogCDFParam, mix_log_cdf_flow
+from src.hl_autoencoders.NVAE.original.neural_ar_operations import ELUConv as ARELUConv
 from torch.distributions.bernoulli import Bernoulli
 
-from src.hl_generative_models.NVAE.original.utils import get_stride_for_cell_type, get_input_size, groups_per_scale
-from src.hl_generative_models.NVAE.original.distributions import Normal, DiscMixLogistic, NormalDecoder
-from src.hl_generative_models.NVAE.original.thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
+from src.hl_autoencoders.NVAE.original.utils import get_stride_for_cell_type, get_input_size, groups_per_scale
+from src.hl_autoencoders.NVAE.original.distributions import Normal, DiscMixLogistic, NormalDecoder
+from src.hl_autoencoders.NVAE.original.thirdparty.inplaced_sync_batchnorm import SyncBatchNormSwish
 
 CHANNEL_MULT = 2
 

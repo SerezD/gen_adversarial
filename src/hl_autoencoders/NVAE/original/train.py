@@ -203,7 +203,7 @@ def train(train_queue, model, cnn_optimizer, grad_scalar, global_step, warmup_it
             # TODO changed this adding non elbo weight!!
             nelbo_batch = recon_loss + balanced_kl * args.non_elbo_weight
             loss = torch.mean(nelbo_batch)
-            norm_loss = model.spectral_norm_parallel() * args.non_elbo_weight
+            norm_loss = model.compute_sr_loss() * args.non_elbo_weight
             bn_loss = model.batchnorm_loss() * args.non_elbo_weight
             # get spectral regularization coefficient (lambda)
             if args.weight_decay_norm_anneal:
