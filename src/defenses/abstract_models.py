@@ -26,8 +26,8 @@ class BaseClassificationModel(ABC):
         if (mean is not None and std is None) or (mean is None and std is not None):
             raise ValueError("to apply Normalization, please specify both mean and std.")
 
-        self.mean = mean
-        self.std = std
+        self.mean = torch.tensor(mean, device=device) if mean is not None else None
+        self.std = torch.tensor(std, device=device) if std is not None else None
         self.preprocess = self.mean is not None
 
         self.classifier = self.load_classifier(model_path, device)
@@ -84,8 +84,8 @@ class HLDefenseModel(ABC):
         if (mean is not None and std is None) or (mean is None and std is not None):
             raise ValueError("to apply Normalization/Denormalization, please specify both mean and std.")
 
-        self.mean = mean
-        self.std = std
+        self.mean = torch.tensor(mean, device=device) if mean is not None else None
+        self.std = torch.tensor(std, device=device) if std is not None else None
         self.preprocess = self.mean is not None
         self.postprocess = self.mean is not None
 
@@ -141,7 +141,7 @@ class HLDefenseModel(ABC):
 
         # preprocessing before autoencoding
         if self.preprocess:
-            batch = normalize(batch, torch.tensor(self.mean), torch.tensor(self.std))
+            batch = normalize(batch, self.mean, self.std)
 
         # extract codes (encoding)
         original_codes = self.get_codes(batch)
@@ -154,7 +154,7 @@ class HLDefenseModel(ABC):
 
         # denormalize before predicting
         if self.postprocess:
-            purified_recons = denormalize(purified_recons, torch.tensor(self.mean), torch.tensor(self.std))
+            purified_recons = denormalize(purified_recons, self.mean, self.std)
 
         # forward for final classification
         preds_purified = self.classifier(purified_recons)

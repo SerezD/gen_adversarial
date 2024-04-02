@@ -123,7 +123,8 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         # create model
         nvae = AutoEncoder(config['autoencoder'], config['resolution'])
 
-        nvae.load_state_dict(checkpoint['state_dict'])
+        # nvae.load_state_dict(checkpoint['state_dict'])
+        nvae.load_state_dict(checkpoint['state_dict_adjusted'])
         nvae.to(device).eval()
         return nvae
 
