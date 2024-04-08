@@ -17,6 +17,9 @@ should perform worse and worse.
 - Try both targeted and un-targeted.
 - Plot success rate vs perturbation rate until reaching 100 % success rate.
 
+- **Outcome:** Due to the random nature of the defense method, it seems impossible
+to find a "stable" prediction for images on the boundary, even with EOT with n steps = 128!
+
 #### Gradient-Based Attacks:
 
 - Few but different and effective attacks.

@@ -207,45 +207,15 @@ if __name__ == '__main__':
     TEMP 0.9 + BN
         FID Score:  55.3527
         IS Score:   5.5839 +- 0.1364
-        
-    [3SCALES_4GROUPS REGULARIZED EPOCH=740]
-    L2 Error:       0.65742
-    L2 Error + BN:  0.78822
-    TEMP 0.9 + BN
-        FID Score:  59.3770
-        IS Score:   5.3409 +- 0.1598
-    
+
     *****************************************
-        
-    [3SCALES_4GROUPS LARGE EPOCH=150]
-    L2 Error + BN:  1.59764
-    TEMP 1.0 + BN
-        FID score: 69.1920
-        IS score: 4.8104 +- 0.0967   
-        
-    [3SCALES_4GROUPS LARGE EPOCH=200]
-    L2 Error + BN:  1.61708
-    TEMP 1.0 + BN
-        FID score: 58.2675
-        IS score:  5.2815 +- 0.1459
-        
-    [3SCALES_4GROUPS LARGE EPOCH=300]
-    L2 Error + BN:  1.24334
-    TEMP 1.0 + BN
-        FID score: 54.6733
-        IS score:  5.5553 +- 0.1120
     
     [3SCALES_4GROUPS LARGE EPOCH=350]
     L2 Error + BN:  1.32193
     TEMP 1.0 + BN   
         FID score:  54.2549
         IS score:   5.6653 +- 0.1226
-        
-    [3SCALES_4GROUPS LARGE EPOCH=399]
-    L2 Error + BN:  1.36773
-    TEMP 1.0 + BN
-        FID score: 54.1824
-        IS score:  5.6279 +- 0.1761
+
     """
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
