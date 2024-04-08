@@ -2,10 +2,12 @@ import argparse
 import json
 import os
 import torch
-from einops import pack, rearrange
+from einops import pack
 import foolbox as fb
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
@@ -80,10 +82,12 @@ def parse_args():
     return args
 
 
-def main(args: argparse.Namespace):
+def main(rank: int, args: argparse.Namespace):
     """
 
     """
+
+    dist.init_process_group(backend='nccl', world_size=WORLD_SIZE, rank=rank)
 
     # load pre-trained models
     if args.classifier_type == 'resnet-32':
@@ -108,8 +112,9 @@ def main(args: argparse.Namespace):
     defense_model = defense_model.eval()
 
     # dataloader
-    dataloader = DataLoader(CoupledDataset(folder=args.images_path, image_size=args.image_size),
-                            batch_size=args.batch_size, shuffle=False)
+    dataset = CoupledDataset(folder=args.images_path, image_size=args.image_size)
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset, rank=rank, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, sampler=sampler)
 
     # create FoolBox Models (move preprocessing phase before attack)
     if defense_model.preprocess:
@@ -195,25 +200,36 @@ def main(args: argparse.Namespace):
                     plt.imshow(display)
                     plt.axis(False)
                     plt.title(f'originals, adversarial and cleaned images at L2={b:.2f}')
-                    plt.savefig(f'{args.plots_folder}/bound={b:.2f}_batch_{b_idx}.png')
+                    plt.savefig(f'{args.plots_folder}/bound={b:.2f}_batch_{rank}:{b_idx}.png')
                     plt.close()
 
+    dist.all_reduce(base_success_rate, op=dist.ReduceOp.SUM)
+    base_success_rate = base_success_rate / WORLD_SIZE
+
+    dist.all_reduce(def_success_rate, op=dist.ReduceOp.SUM)
+    def_success_rate = def_success_rate / WORLD_SIZE
+
     # compute and save final results
-    res_dict = {}
+    if rank == 0:
+        res_dict = {}
 
-    for i, b in enumerate(bounds_l2):
-        # print(f'brute force l2 bound={b:.2f} success base {base_success_rate[i].mean().item()}')
-        # print(f'brute force l2 bound={b:.2f} success defense {def_success_rate[i].mean().item()}')
+        for i, b in enumerate(bounds_l2):
+            # print(f'brute force l2 bound={b:.2f} success base {base_success_rate[i].mean().item()}')
+            # print(f'brute force l2 bound={b:.2f} success defense {def_success_rate[i].mean().item()}')
 
-        res_dict[f'l2 bound={b:.2f} success on base'] = base_success_rate[i].mean().item()
-        res_dict[f'l2 bound={b:.2f} success on defense'] = def_success_rate[i].mean().item()
+            res_dict[f'l2 bound={b:.2f} success on base'] = base_success_rate[i].mean().item()
+            res_dict[f'l2 bound={b:.2f} success on defense'] = def_success_rate[i].mean().item()
 
-    with open(f'{args.results_folder}results_{args.attack}.json', 'w') as f:
-         json.dump(res_dict, f)
+        with open(f'{args.results_folder}results_{args.attack}.json', 'w') as f:
+             json.dump(res_dict, f)
+
+    dist.barrier()
+    dist.destroy_process_group()
 
 
 if __name__ == '__main__':
 
     arguments = parse_args()
-    main(arguments)
+    WORLD_SIZE = torch.cuda.device_count()
+    mp.spawn(main, nprocs=WORLD_SIZE, args=(arguments))
 
