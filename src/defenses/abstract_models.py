@@ -78,6 +78,8 @@ class HLDefenseModel(ABC):
 
         super().__init__()
 
+        self.device = device
+
         self.classifier = classifier
         self.classifier.set_device(device)
 
@@ -103,29 +105,11 @@ class HLDefenseModel(ABC):
         pass
 
     @abstractmethod
-    def get_codes(self, batch: torch.Tensor) -> list:
+    def purify(self, batch: torch.Tensor) -> torch.Tensor:
         """
         HL encoding procedure to extract the codes.
         :param batch: pre-processed images of shape (B, C, H, W).
-        :return: list of codes, sorted by hierarchy i. Each code is a torch tensor of shape (B, N_i)
-        """
-        pass
-
-    @abstractmethod
-    def sample_codes(self, codes: list) -> list:
-        """
-        HL procedure to re-sampling some codes.
-        :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
-        :return: list of codes of the same shape, where some of them have been re-sampled.
-        """
-        pass
-
-    @abstractmethod
-    def decode(self, codes: list) -> list:
-        """
-        HL decoding procedure to get images from codes.
-        :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
-        :return: batch of images of shape (B, C, H, W).
+        :return: post_precessed purified reconstructions (B, C, H, W)
         """
         pass
 
@@ -143,14 +127,8 @@ class HLDefenseModel(ABC):
         if self.preprocess:
             batch = normalize(batch, self.mean, self.std)
 
-        # extract codes (encoding)
-        original_codes = self.get_codes(batch)
-
-        # re-sample some codes
-        purified_codes = self.sample_codes(original_codes)
-
-        # decode
-        purified_recons = self.decode(purified_codes)
+        # purify
+        purified_recons = self.purify(batch)
 
         # denormalize before predicting
         if self.postprocess:

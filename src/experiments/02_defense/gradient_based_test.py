@@ -16,9 +16,6 @@ from src.defenses.models import Cifar10ResnetModel, CelebAResnetModel, Cifar10VG
     CelebAStyleGanDefenseModel
 
 
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-
-
 def parse_args():
 
     """
@@ -26,7 +23,7 @@ def parse_args():
     --images_path
     /media/dserez/datasets/celeba_hq_gender/test/
     --batch_size
-    4
+    1
     --classifier_path
     /media/dserez/runs/adversarial/CNNs/resnet50_celeba_hq_gender/best.pt
     --classifier_type
@@ -37,6 +34,24 @@ def parse_args():
     E4E_StyleGAN
     --resample_from
     9
+    --results_folder
+    ./tmp/
+
+    NVAE
+    --images_path
+    /media/dserez/datasets/cifar10/validation/
+    --batch_size
+    2
+    --classifier_path
+    /media/dserez/runs/adversarial/CNNs/hub/checkpoints/cifar10_resnet32-ef93fc4d.pt
+    --classifier_type
+    resnet-32
+    --autoencoder_path
+    /media/dserez/runs/NVAE/cifar10/ours/3scales_4groups.pt
+    --autoencoder_name
+    NVAE4x3
+    --resample_from
+    8
     --results_folder
     ./tmp/
     """
@@ -82,29 +97,41 @@ def parse_args():
     return args
 
 
-def main(rank: int, args: argparse.Namespace):
+def main(rank: int, w_size: int, args: argparse.Namespace):
     """
 
     """
 
-    dist.init_process_group(backend='nccl', world_size=WORLD_SIZE, rank=rank)
+    device = f'cuda:{rank}'
+    torch.cuda.set_device(rank)
+
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ["MASTER_ADDR"] = "localhost"
+
+    if 'MASTER_PORT' not in os.environ:
+        os.environ["MASTER_PORT"] = "29500"
+
+    dist.init_process_group(backend='nccl', world_size=w_size, rank=rank)
 
     # load pre-trained models
     if args.classifier_type == 'resnet-32':
         base_classifier = Cifar10ResnetModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (0.1, 0.2, 0.5, 1.0, 2.0)
+        bounds_l2 = (0.1, 0.2, 0.5, 1.0)
+        n_steps = 4
     elif args.classifier_type == 'vgg-16':
         base_classifier = Cifar10VGGModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (0.1, 0.2, 0.5, 1.0, 2.0)  # TODO check
+        bounds_l2 = (0.1, 0.2, 0.5, 1.0)  # TODO check
+        n_steps = 4
     elif args.classifier_type == 'resnet-50':
         base_classifier = CelebAResnetModel(args.classifier_path, device)
         defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 256
         bounds_l2 = (0.25, 0.5, 1.0, 2.0)
+        n_steps = 8
     else:
         raise ValueError(f'Unknown classifier type: {args.classifier_type}')
 
@@ -126,7 +153,7 @@ def main(rank: int, args: argparse.Namespace):
     # wrap defense with EOT to maintain deterministic predictions
     fb_defense_model = fb.PyTorchModel(defense_model, bounds=(0, 1), device=device,
                                        preprocessing=preprocessing)
-    fb_defense_model = fb.models.ExpectationOverTransformationWrapper(fb_defense_model, n_steps=8)  # TODO check
+    fb_defense_model = fb.models.ExpectationOverTransformationWrapper(fb_defense_model, n_steps=n_steps)
 
     if base_classifier.preprocess:
         # using base_model (has no automatic pre_pocessing in __call__)
@@ -185,14 +212,16 @@ def main(rank: int, args: argparse.Namespace):
             with torch.no_grad():
 
                 # estimate of the cleaned image (estimate because the process is random)
+                if defense_model.mean is not None:
+                    defense_model.preprocess = True
                 cleaned_imgs = [defense_model(found_adv, preds_only=False)[-1] for found_adv in adv_def]
 
                 for i, b in enumerate(bounds_l2):
 
                     max_b = 8
-                    img_i = x1.clone()[:max_b]
-                    adv_i = adv_def[i][:max_b]
-                    def_i = cleaned_imgs[i][:max_b]
+                    img_i = x1.clone()[:max_b].clamp(0., 1.)
+                    adv_i = adv_def[i][:max_b].clamp(0., 1.)
+                    def_i = cleaned_imgs[i][:max_b].clamp(0., 1.)
                     max_b = adv_i.shape[0]
 
                     examples = torch.cat([img_i, adv_i, def_i], dim=0)
@@ -204,10 +233,10 @@ def main(rank: int, args: argparse.Namespace):
                     plt.close()
 
     dist.all_reduce(base_success_rate, op=dist.ReduceOp.SUM)
-    base_success_rate = base_success_rate / WORLD_SIZE
+    base_success_rate = base_success_rate / w_size
 
     dist.all_reduce(def_success_rate, op=dist.ReduceOp.SUM)
-    def_success_rate = def_success_rate / WORLD_SIZE
+    def_success_rate = def_success_rate / w_size
 
     # compute and save final results
     if rank == 0:
@@ -220,10 +249,11 @@ def main(rank: int, args: argparse.Namespace):
             res_dict[f'l2 bound={b:.2f} success on base'] = base_success_rate[i].mean().item()
             res_dict[f'l2 bound={b:.2f} success on defense'] = def_success_rate[i].mean().item()
 
-        with open(f'{args.results_folder}results_{args.attack}.json', 'w') as f:
+        print('Opening file...')
+        with open(f'{args.results_folder}results_{args.attack}_resample:{args.resample_from}.json', 'w') as f:
              json.dump(res_dict, f)
 
-    dist.barrier()
+    # dist.barrier()
     dist.destroy_process_group()
 
 
@@ -231,5 +261,5 @@ if __name__ == '__main__':
 
     arguments = parse_args()
     WORLD_SIZE = torch.cuda.device_count()
-    mp.spawn(main, nprocs=WORLD_SIZE, args=(arguments))
+    mp.spawn(main, nprocs=WORLD_SIZE, args=(WORLD_SIZE, arguments))
 

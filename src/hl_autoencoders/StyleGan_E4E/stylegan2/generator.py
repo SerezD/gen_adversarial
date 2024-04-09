@@ -86,6 +86,7 @@ class EqualLinear(nn.Module):
         self.lr_mul = lr_mul
 
     def forward(self, input):
+
         weight = self.weight
         if self.activation:
             out = F.linear(input, weight * self.scale)

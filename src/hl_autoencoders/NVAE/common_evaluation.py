@@ -215,7 +215,14 @@ if __name__ == '__main__':
     TEMP 1.0 + BN   
         FID score:  54.2549
         IS score:   5.6653 +- 0.1226
+        
+    *****************************************
 
+    [3SCALES_8GROUPS EPOCH=399]
+    L2 Error + BN:  0.67706
+    TEMP 1.0 + BN   
+        FID score:  52.4667
+        IS score:   5.5753 +- 0.0812
     """
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
@@ -223,7 +230,7 @@ if __name__ == '__main__':
     IS_OURS = True
 
     if IS_OURS:
-        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/4x3_large/epoch=350.pt'
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/8x3/epoch=399.pt'
 
     else:
         CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/last_hope.pt'

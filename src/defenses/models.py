@@ -128,45 +128,16 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         nvae.to(device).eval()
         return nvae
 
-    def get_codes(self, batch: torch.Tensor) -> list:
+    def purify(self, batch: torch.Tensor) -> torch.Tensor:
         """
         HL encoding procedure to extract the codes.
         :param batch: pre-processed images of shape (B, C, H, W).
-        :return: list of codes, sorted by hierarchy i. Each code is a torch tensor of shape (B, N_i)
+        :return: post_precessed purified reconstructions (B, C, H, W)
         """
-        codes = self.autoencoder.encode(batch, deterministic=True)
-
-        b, _, _, _ = batch.shape
-        codes = [c.view(b, -1) for c in codes]
-
-        return codes
-
-    def sample_codes(self, codes: list) -> list:
-        """
-        HL procedure to re-sampling some codes.
-        :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
-        :return: list of codes of the same shape, where some of them have been re-sampled.
-        """
-        return self.autoencoder.resample_codes(codes[:self.resample_from], self.temperature)
-
-    def decode(self, codes: list) -> list:
-        """
-        HL decoding procedure to get images from codes.
-        :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
-        :return: batch of images of shape (B, C, H, W).
-        """
-
-        # need to reformat codes in the correct shape
-        b = codes[0].shape[0]
-        d = self.autoencoder.num_latent_per_group
-        reshaped_codes = []
-        for c in codes:
-            r = int(math.sqrt(c.shape[1] // d))
-            reshaped_codes.append(c.reshape(b, d, r, r))
-
-        logits = self.autoencoder.decode(reshaped_codes)
-        recons = DiscMixLogistic(logits).sample(self.temperature)
-        return recons
+        logits = self.autoencoder.purify(batch, self.resample_from)
+        out_dist = DiscMixLogistic(logits)
+        reconstructions = out_dist.sample()
+        return reconstructions
 
 
 class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
@@ -199,43 +170,24 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         net = net.to(device).eval()
         return net
 
-    def get_codes(self, batch: torch.Tensor) -> list:
+    def purify(self, batch: torch.Tensor) -> torch.Tensor:
         """
         HL encoding procedure to extract the codes.
         :param batch: pre-processed images of shape (B, C, H, W).
-        :return: list of codes, sorted by hierarchy i. Each code is a torch tensor of shape (B, N_i)
+        :return: post_precessed purified reconstructions (B, C, H, W)
         """
         codes = self.autoencoder.encode(batch)
 
-        b, _, _, _ = batch.shape
+        b, n_codes, d = codes.shape
+        device = codes.device
+
         codes = rearrange(codes, 'b n d -> n b d')
         codes = [c for c in codes]
-
-        return codes
-
-    def sample_codes(self, codes: list) -> list:
-        """
-        HL procedure to re-sampling some codes.
-        :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
-        :return: list of codes of the same shape, where some of them have been re-sampled.
-        """
-        n_codes = len(codes)
-        b, d = codes[0].shape
-        device = codes[0].device
 
         # sample gaussian noise, then get new styles by mixing with codes.
         noises = torch.normal(0, 1, (n_codes, b, d), device=device)
         styles = [self.autoencoder.decoder.style(n) for n in noises]
-        styles = codes[:self.resample_from] + styles[self.resample_from:]
-
-        return styles
-
-    def decode(self, codes: list) -> list:
-        """
-        HL decoding procedure to get images from codes.
-        :param codes: pre-extracted codes as list of tensors, sorted by hierarchy i.
-        :return: batch of images of shape (B, C, H, W).
-        """
+        codes = codes[:self.resample_from] + styles[self.resample_from:]
 
         # put codes in the correct shape
         codes = rearrange(torch.stack(codes), 'n b d -> b n d')

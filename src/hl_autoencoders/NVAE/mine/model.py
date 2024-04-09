@@ -776,27 +776,62 @@ class AutoEncoder(nn.Module):
 
         return self.decode(self.encode(gt_images, deterministic))
 
-    def resample_codes(self, chunks: list, temperature: float = 1.):
-        """
-        len(chunks) is less than n. hierarchies, samples the remaining ones with given temperature
-        """
+    def purify(self, batch: torch.Tensor, resample_from: int, temperature: float = 1.):
 
-        # assert at least one chunk is given
-        assert len(chunks) >= 1
-        chunks = chunks.copy()
-        resulting_codes = []
+        b = batch.shape[0]
+        assert resample_from > 0
 
-        z_0 = chunks.pop(0)
-        resulting_codes.append(z_0)
-        b = z_0.shape[0]
-        d, r = self.num_latent_per_group, int(math.sqrt(z_0.shape[1] // self.num_latent_per_group))
-        z_0 = z_0.reshape(b, d, r, r)
+        # preprocessing phase
+        normalized_images = (batch * 2) - 1.0  # in range -1 1
+        x = self.preprocessing_block(normalized_images)
+
+        # encoding tower phase
+        encoder_combiners_x = {}
+
+        for s in range(self.num_scales - 1, -1, -1):
+
+            scale = self.encoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.groups_per_scale[s]):
+
+                group = scale.get_submodule(f'group_{g}')
+
+                for c in range(self.num_cells_per_group):
+                    x = group.get_submodule(f'cell_{c}')(x)
+
+                # add intermediate x (will be used as combiner input for this scale)
+                if not (s == 0 and g == 0):
+                    encoder_combiners_x[f'{s}:{g}'] = x
+
+            if s > 0:
+                x = scale.get_submodule(f'downsampling')(x)
+
+        # encoder 0
+        x = self.encoder_0(x)
+
+        # obtain q(z_0|x), p(z_0) for KL loss, sample z_0
+
+        # encoder q(z_0|x)
+        mu_q, log_sig_q = torch.chunk(self.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
+        dist_enc = Normal(mu_q, log_sig_q)
+        z_0, _ = dist_enc.sample()  # uses reparametrization trick
+
+        # prior p(z_0) is a standard Gaussian (log_sigma 0 --> sigma = 1.)
+        dist_dec = Normal(torch.zeros_like(mu_q), torch.zeros_like(log_sig_q))
+
+        # apply normalizing flows
+        if self.use_nf:
+            z_0 = self.nf_cells.get_submodule('nf_0:0')(z_0)
+
+        # decoding phase
 
         # start from constant prior
         x = self.const_prior.expand(b, -1, -1, -1)
 
         # first combiner (inject z_0)
         x = self.decoder_combiners.get_submodule('combiner_0:0')(x, z_0)
+
+        count_latents = 1
 
         for s in range(self.num_scales):
 
@@ -812,12 +847,23 @@ class AutoEncoder(nn.Module):
                     for c in range(self.num_cells_per_group):
                         x = group.get_submodule(f'cell_{c}')(x)
 
-                    # get code or sample it
-                    if len(chunks) > 0:
-                        z_i = chunks.pop(0)
-                        r = int(math.sqrt(z_i.shape[1] // self.num_latent_per_group))
-                        z_i = z_i.reshape(b, d, r, r)
+                    if count_latents < resample_from:
+                        # obtain q(z_i|x, z_l>i), p(z_i|z_l>i) for KL loss, sample z_i
+                        # extract params for p (conditioned on previous decoding)
+                        mu_p, log_sig_p = torch.chunk(self.dec_sampler.get_submodule(f'sampler_{s}:{g}')(x), 2, dim=1)
+
+                        # extract params for q (conditioned on encoder features and previous decoding)
+                        enc_combiner = self.encoder_combiners.get_submodule(f'combiner_{s}:{g}')
+                        enc_sampler = self.enc_sampler.get_submodule(f'sampler_{s}:{g}')
+                        mu_q, log_sig_q = torch.chunk(
+                            enc_sampler(enc_combiner(encoder_combiners_x[f'{s}:{g}'], x)),
+                            2, dim=1)
+
+                        # sample z_i as combination of encoder and decoder params
+                        dist_enc = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
+                        z_i, _ = dist_enc.sample()
                     else:
+
                         # extract params for p (conditioned on previous decoding)
                         mu_p, log_sig_p = torch.chunk(
                             self.dec_sampler.get_submodule(f'sampler_{s}:{g}')(x), 2, dim=1)
@@ -825,13 +871,12 @@ class AutoEncoder(nn.Module):
                         # sample z_i
                         dist = Normal(mu_p, log_sig_p, temp=temperature)
                         z_i, _ = dist.sample()
-                        # z_i = dist.mu  # better to take mean
+
+                    count_latents += 1
 
                     # apply NF
                     if self.use_nf:
                         z_i = self.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
-
-                    resulting_codes.append(z_i.view(b, -1))
 
                     # combine x and z_i
                     x = self.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
@@ -840,4 +885,10 @@ class AutoEncoder(nn.Module):
             if s < self.num_scales - 1:
                 x = scale.get_submodule('upsampling')(x)
 
-        return resulting_codes
+        # postprocessing phase
+        x = self.postprocessing_block(x)
+
+        # get logits for mixture
+        logits = self.to_logits(x)
+
+        return logits
