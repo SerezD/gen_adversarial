@@ -69,9 +69,6 @@ def parse_args():
     parser.add_argument('--results_folder', type=str, required=True,
                         help='folder to save .pickle file with results')
 
-    parser.add_argument('--bound_magnitude', type=float, default=0.0,
-                        help='L2 bound magnitude for noise')
-
     args = parser.parse_args()
 
     assert 'nvae' in args.autoencoder_name.lower() or 'stylegan' in args.autoencoder_name.lower(), \
@@ -83,28 +80,6 @@ def parse_args():
         os.makedirs(args.results_folder)
 
     return args
-
-
-def get_noisy_batch(batch: torch.Tensor, eps: float, clip_min: float = 0.0, clip_max: float = 1.0) -> torch.Tensor:
-    """
-    returns noisy batch within L2 bound = eps.
-    If eps is zero, returns batch.
-    """
-
-    # get random noise and its l2 norm
-    noise = torch.zeros_like(batch).uniform_(-clip_max / 2, clip_max / 2)
-
-    l2_norm_noise = torch.max(torch.ones_like(noise) * 1e-12, torch.sum(noise ** 2, dim=[1, 2, 3], keepdim=True))
-    l2_norm_noise = torch.sqrt(l2_norm_noise)
-
-    # get the normalized noise
-    mul_factor = torch.min(torch.ones_like(noise), eps / l2_norm_noise)
-    noise = noise * mul_factor
-
-    # clamp in range and return
-    batch = torch.clamp(batch + noise, clip_min, clip_max)
-
-    return batch
 
 
 @torch.no_grad()
@@ -134,9 +109,6 @@ def main(args: argparse.Namespace):
 
         batch = batch.to(device)
 
-        # add noise
-        batch = get_noisy_batch(batch, args.bound_magnitude)
-
         if preprocessing is not None:
             batch = preprocessing(batch)
 
@@ -149,10 +121,7 @@ def main(args: argparse.Namespace):
             else:
                 train_codes[i] = pack([train_codes[i], c.cpu().numpy()], '* n')[0]
 
-    file_name = f'{args.results_folder}/train_codes'
-    if args.bound_magnitude > 0:
-        file_name += f'_l2={args.bound_magnitude}'
-    file_name += '.pickle'
+    file_name = f'{args.results_folder}/train_codes.pickle'
 
     with open(file_name, 'wb') as f:
         pickle.dump(train_codes, f)
@@ -164,9 +133,6 @@ def main(args: argparse.Namespace):
     for batch in tqdm(valid_dataloader):
 
         batch = batch.to(device)
-
-        # add noise
-        batch = get_noisy_batch(batch, args.bound_magnitude)
 
         if preprocessing is not None:
             batch = preprocessing(batch)
@@ -180,10 +146,7 @@ def main(args: argparse.Namespace):
             else:
                 valid_codes[i] = pack([valid_codes[i], c.cpu().numpy()], '* n')[0]
 
-    file_name = f'{args.results_folder}/valid_codes'
-    if args.bound_magnitude > 0:
-        file_name += f'_l2={args.bound_magnitude}'
-    file_name += '.pickle'
+    file_name = f'{args.results_folder}/valid_codes.pickle'
 
     with open(file_name, 'wb') as f:
         pickle.dump(valid_codes, f)

@@ -130,7 +130,7 @@ def parse_args():
     parser.add_argument('--classifier_type', type=str, choices=['resnet-32', 'vgg-16', 'resnet-50'],
                         help='type of classifier')
 
-    parser.add_argument('--attack', type=str, choices=['DeepFool', 'C&W'])
+    parser.add_argument('--attack', type=str, choices=['BruteForce', 'DeepFool', 'C&W'])
     parser.add_argument('--bound_magnitude', type=float, help='L2 bound magnitude for attack')
 
     args = parser.parse_args()
@@ -174,11 +174,14 @@ def main(args: argparse.Namespace):
 
     # attack info
     attacked_model = fb.PyTorchModel(classifier, bounds=(0, 1), preprocessing=preprocessing_cl, device=device)
+
     if args.attack == 'C&W':
         # default requires unrealistic amount of time!
         attack = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=1, steps=2048)
-    else:
+    elif args.attack == 'DeepFool':
         attack = fb.attacks.L2DeepFoolAttack()
+    else:
+        attack = fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=128)
 
     print('[INFO] Computing codes on validation set...')
     valid_codes = {}
@@ -217,7 +220,7 @@ def main(args: argparse.Namespace):
 
 if __name__ == '__main__':
     """
-    Compute latent codes given HL autoencoder for attacked val set of given classifier.
+    Compute latent codes after attack on validation set.
     """
     arguments = parse_args()
     main(arguments)

@@ -56,14 +56,17 @@ def main(json_file: str, cnn_type: str, model_type: str):
 
     # plot histogram of accuracies
     plot_accuracies = []
+    clean_accuracies = []
     for i, latent in enumerate(accuracies.keys()):
 
         if latent == 'all':
             continue
-
+        clean_accuracies.append(accuracies[latent]['0.00'])
         plot_accuracies.append(accuracies[latent]['1.00'])
 
     plt.bar(np.arange(len(plot_accuracies)), plot_accuracies)
+    plt.plot(np.arange(len(plot_accuracies)), clean_accuracies, c='red', label='original accuracy')
+    plt.legend()
     plt.xlabel('Latent Index')
     plt.ylabel('Accuracy')
     plt.title(f'Accuracies when changing latents of {model_type} on {cnn_type}')
