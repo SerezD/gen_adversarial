@@ -92,7 +92,7 @@ class CelebAResnetModel(BaseClassificationModel):
 class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
-                 resample_from: int, temperature: float = 1.0):
+                 resample_from: int, temperature: float = 0.6):
         """
         Defense model using an NVAE pretrained on Cifar10.
 
@@ -134,7 +134,7 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         :param batch: pre-processed images of shape (B, C, H, W).
         :return: post_precessed purified reconstructions (B, C, H, W)
         """
-        logits = self.autoencoder.purify(batch, self.resample_from)
+        logits = self.autoencoder.purify(batch, self.resample_from, self.temperature)
         out_dist = DiscMixLogistic(logits)
         reconstructions = out_dist.sample()
         return reconstructions

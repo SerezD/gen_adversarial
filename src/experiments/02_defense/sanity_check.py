@@ -106,12 +106,12 @@ def main(args: argparse.Namespace):
         base_classifier = Cifar10ResnetModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (0.1, 0.5, 1.0, 2.0)
+        bounds_l2 = (1.0, 2.0, 4.0)
     elif args.classifier_type == 'vgg-16':
         base_classifier = Cifar10VGGModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (0.1, 0.5, 1.0, 2.0)
+        bounds_l2 = (1.0, 2.0, 4.0)
     elif args.classifier_type == 'resnet-50':
         base_classifier = CelebAResnetModel(args.classifier_path, device)
         defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
@@ -138,7 +138,7 @@ def main(args: argparse.Namespace):
     # this is a simple counter_attack, to avoid gradient masking
     fb_defense_model = fb.PyTorchModel(defense_model, bounds=(0, 1), device=device,
                                        preprocessing=preprocessing)
-    fb_defense_model = fb.models.ExpectationOverTransformationWrapper(fb_defense_model, n_steps=4)  # TODO CHECK this number!
+    fb_defense_model = fb.models.ExpectationOverTransformationWrapper(fb_defense_model, n_steps=8)  # TODO CHECK this number!
 
     if base_classifier.preprocess:
         # using base_model (has no automatic pre_pocessing in __call__)
@@ -156,7 +156,7 @@ def main(args: argparse.Namespace):
 
     # params for L2 naive attacks
     iv_attack = fb.attacks.InversionAttack(distance=fb.distances.l2)
-    bf_attack = fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=100)  # TODO CHECK this number!
+    bf_attack = fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=128)  # TODO CHECK this number!
 
     base_success_rate = torch.empty((2, len(bounds_l2), 0), device=device)
     def_success_rate = torch.empty((2, len(bounds_l2), 0), device=device)

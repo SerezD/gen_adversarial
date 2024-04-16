@@ -22,6 +22,9 @@ def parse_args():
     parser.add_argument('--checkpoint_path', type=str, required=True,
                         help='NVAE checkpoint path file')
 
+    parser.add_argument('--temperature', type=float, required=True,
+                        help='Sampling Temperature')
+
     args = parser.parse_args()
 
     # check checkpoint file exists
@@ -79,7 +82,7 @@ def update_bn(rank, args: argparse.Namespace, device: str = 'cuda:0'):
         model.train()
         with autocast():
             for _ in tqdm(range(500)):
-                model.sample(100, 1.0, device)
+                model.sample(100, args.temperature, device)
         model.eval()
 
     # save updated checkpoint

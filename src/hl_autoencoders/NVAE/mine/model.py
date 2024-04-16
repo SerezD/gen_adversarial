@@ -816,9 +816,6 @@ class AutoEncoder(nn.Module):
         dist_enc = Normal(mu_q, log_sig_q)
         z_0, _ = dist_enc.sample()  # uses reparametrization trick
 
-        # prior p(z_0) is a standard Gaussian (log_sigma 0 --> sigma = 1.)
-        dist_dec = Normal(torch.zeros_like(mu_q), torch.zeros_like(log_sig_q))
-
         # apply normalizing flows
         if self.use_nf:
             z_0 = self.nf_cells.get_submodule('nf_0:0')(z_0)
@@ -861,7 +858,9 @@ class AutoEncoder(nn.Module):
 
                         # sample z_i as combination of encoder and decoder params
                         dist_enc = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
-                        z_i, _ = dist_enc.sample()
+                        # z_i, _ = dist_enc.sample()
+                        z_i = dist_enc.mu
+
                     else:
 
                         # extract params for p (conditioned on previous decoding)

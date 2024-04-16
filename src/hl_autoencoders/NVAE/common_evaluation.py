@@ -99,28 +99,28 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
 
     with torch.no_grad():
 
-        # TEST L2 ERROR
-        print(f'[INFO] reconstructing...')
-        recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
-
-        for b in tqdm(range(0, data_n, batch_size)):
-
-            batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
-
-            # reconstruct cifar10 test set
-            if IS_OURS:
-                logits = nvae.autoencode(batch_x, deterministic=True)
-                batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
-            else:
-                logits = nvae.decode(nvae.encode_deterministic(batch_x))
-                decoder = nvae.decoder_output(logits)
-                batch_recons = decoder.mean()
-
-            recons, _ = pack([recons, batch_recons], '* c h w')
-
-        # L2 error:
-        l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
-        print(f"L2 Error: {l2:.5f}")
+        # # TEST L2 ERROR
+        # print(f'[INFO] reconstructing...')
+        # recons = torch.empty((0, 3, 32, 32), device=f'cuda:{rank}')
+        #
+        # for b in tqdm(range(0, data_n, batch_size)):
+        #
+        #     batch_x = x_test[b:b + batch_size].to(f'cuda:{rank}')
+        #
+        #     # reconstruct cifar10 test set
+        #     if IS_OURS:
+        #         logits = nvae.autoencode(batch_x, deterministic=True)
+        #         batch_recons = DiscMixLogistic(logits, img_channels=3, num_bits=8).mean()
+        #     else:
+        #         logits = nvae.decode(nvae.encode_deterministic(batch_x))
+        #         decoder = nvae.decoder_output(logits)
+        #         batch_recons = decoder.mean()
+        #
+        #     recons, _ = pack([recons, batch_recons], '* c h w')
+        #
+        # # L2 error:
+        # l2 = torch.mean(torch.cdist(x_test.cuda().view(data_n, -1), recons.view(data_n, -1), p=2).diag())
+        # print(f"L2 Error: {l2:.5f}")
         #
         # print(f'[INFO] adjusting batch norm...')
         # nvae.train()
@@ -147,11 +147,11 @@ def main(rank, temperature: float, IS_OURS: bool, CKPT_NVAE: str, DATA_PATH: str
             if IS_OURS:
                 with autocast():
                     logits = nvae.sample(batch_size, temperature, f'cuda:{rank}')
-                    samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample(temperature)
+                    samples = DiscMixLogistic(logits, img_channels=3, num_bits=8).sample()
             else:
                 with autocast():
                     logits = nvae.sample(batch_size, temperature)
-                samples = nvae.decoder_output(logits).sample(temperature)
+                samples = nvae.decoder_output(logits).sample()
 
             if b == 0:
                 imgs = make_grid(samples[:32]).cpu().numpy().transpose(1, 2, 0)
@@ -218,26 +218,31 @@ if __name__ == '__main__':
         
     *****************************************
 
-    [3SCALES_8GROUPS EPOCH=399]
-    L2 Error + BN:  0.67706
+    [3SCALES_8GROUPS EPOCH=599]
+    L2 Error + BN (T=1.):  0.68003
+    L2 Error + BN (T=.6):  0.85704
+    
     TEMP 1.0 + BN   
-        FID score:  52.4667
-        IS score:   5.5753 +- 0.0812
+        FID score:  49.8140
+        IS score:   5.8071 +- 0.1702
+    TEMP 0.6 + BN   
+        FID score:  35.9569
+        IS score:   7.1258 +- 0.2009
     """
 
     DATA_PATH = '/media/dserez/datasets/cifar10/'
 
     IS_OURS = True
+    TEMP = 0.6
 
     if IS_OURS:
-        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/8x3/epoch=399.pt'
+        CKPT_NVAE = f'/media/dserez/runs/NVAE/cifar10/ours/8x3/epoch=599.pt'
 
     else:
         CKPT_NVAE = '/media/dserez/runs/NVAE/cifar10/best/last_hope.pt'
 
-    # main(0, 0.8, IS_OURS, CKPT_NVAE, DATA_PATH)
     try:
-        mp.spawn(main, args=(1.0, IS_OURS, CKPT_NVAE, DATA_PATH), nprocs=1)
+        mp.spawn(main, args=(TEMP, IS_OURS, CKPT_NVAE, DATA_PATH), nprocs=1)
     except KeyboardInterrupt as k:
         dist.destroy_process_group()
         raise k
