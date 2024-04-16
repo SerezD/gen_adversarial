@@ -118,14 +118,14 @@ def main(rank: int, w_size: int, args: argparse.Namespace):
         base_classifier = Cifar10ResnetModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (0.1, 0.2, 0.5, 1.0)
-        n_steps = 4
+        bounds_l2 = (0.25, 0.5, 1.0, 2.0)
+        n_steps = 8
     elif args.classifier_type == 'vgg-16':
         base_classifier = Cifar10VGGModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (0.1, 0.2, 0.5, 1.0)  # TODO check
-        n_steps = 4
+        bounds_l2 = (0.25, 0.5, 1.0, 2.0)
+        n_steps = 8
     elif args.classifier_type == 'resnet-50':
         base_classifier = CelebAResnetModel(args.classifier_path, device)
         defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
@@ -207,7 +207,7 @@ def main(rank: int, w_size: int, args: argparse.Namespace):
         def_success_rate, _ = pack([def_success_rate, suc_def], 'n *')
 
         # save visual examples of applied perturbation.
-        if b_idx % 20 == 0:
+        if rank == 0 and b_idx % 20 == 0:
 
             with torch.no_grad():
 
@@ -229,8 +229,11 @@ def main(rank: int, w_size: int, args: argparse.Namespace):
                     plt.imshow(display)
                     plt.axis(False)
                     plt.title(f'originals, adversarial and cleaned images at L2={b:.2f}')
-                    plt.savefig(f'{args.plots_folder}/bound={b:.2f}_batch_{rank}:{b_idx}.png')
+                    plt.savefig(f'{args.plots_folder}/resample={args.resample_from}_bound={b:.2f}_batch={b_idx}.png')
                     plt.close()
+
+        # time of attack greatly depends on input images, need this to avoid timeout errors
+        dist.barrier()
 
     dist.all_reduce(base_success_rate, op=dist.ReduceOp.SUM)
     base_success_rate = base_success_rate / w_size
@@ -253,7 +256,6 @@ def main(rank: int, w_size: int, args: argparse.Namespace):
         with open(f'{args.results_folder}results_{args.attack}_resample:{args.resample_from}.json', 'w') as f:
              json.dump(res_dict, f)
 
-    # dist.barrier()
     dist.destroy_process_group()
 
 
