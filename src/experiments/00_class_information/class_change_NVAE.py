@@ -4,15 +4,15 @@ from kornia.enhance import normalize
 from matplotlib import pyplot as plt
 import numpy as np
 import os
-import pickle
+import json
 import torch
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.datasets import CoupledDataset
-from src.hl_generative_models.NVAE.mine.distributions import DiscMixLogistic
-from src.final_experiments.common_utils import load_NVAE, load_hub_CNN
+from src.hl_autoencoders.NVAE.mine.distributions import DiscMixLogistic
+from src.defenses.common_utils import load_NVAE, load_hub_CNN
 
 
 def parse_args():
@@ -37,10 +37,10 @@ def parse_args():
     parser.add_argument('--name', type=str, default='test',
                         help='name of experiments for saving results')
 
-    parser.add_argument('--visual_examples_saving_folder', type=str, default='../plots/',
+    parser.add_argument('--visual_examples_saving_folder', type=str, default='./plots/',
                         help='where to save visual examples of the reconstructed interpolations')
 
-    parser.add_argument('--pickle_file_saving_folder', type=str, default='../results/',
+    parser.add_argument('--pickle_file_saving_folder', type=str, default='./results/',
                         help='where to save pickle file with the accuracies')
 
     args = parser.parse_args()
@@ -129,12 +129,12 @@ def main(data_path: str, batch_size: int, cnn_type: str, cnn_path: str, nvae_pat
                 all_labels = torch.cat((all_labels, y1))
 
             # save to final dict
-            accuracy = (all_preds == all_labels).to(torch.float32).mean()
+            accuracy = (all_preds == all_labels).to(torch.float32).mean().item()
 
             if str(latent) not in dict_accuracies.keys():
-                dict_accuracies[str(latent)] = {str(a): accuracy}
+                dict_accuracies[str(latent)] = {f'{a:.2f}': accuracy}
             else:
-                dict_accuracies[str(latent)][str(a)] = accuracy
+                dict_accuracies[str(latent)][f'{a:.2f}'] = accuracy
 
     # save image
     for i, sample in enumerate(example_images):
@@ -147,8 +147,8 @@ def main(data_path: str, batch_size: int, cnn_type: str, cnn_path: str, nvae_pat
         plt.close()
 
     # save pickle
-    with open(f'{pickle_dir}/class_change_accuracies.pickle', 'wb') as f:
-        pickle.dump(dict_accuracies, f)
+    with open(f'{pickle_dir}/class_change_accuracies.json', 'w') as f:
+        json.dump(dict_accuracies, f)
 
 
 if __name__ == '__main__':
