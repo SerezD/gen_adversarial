@@ -29,7 +29,7 @@ def accumulate(model1, model2, decay=0.999):
 def sample_data(dataset, batch_size, image_size=4):
     transform = transforms.Compose(
         [
-            transforms.CenterCrop(180),
+            # transforms.CenterCrop(180), # TODO REMOVED
             transforms.Resize(image_size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
@@ -59,7 +59,7 @@ def train(args, dataset, generator, discriminator):
 
     mseloss = torch.nn.MSELoss().cuda()
     # mseloss = torch.nn.L1Loss().cuda()
-    pbar = tqdm(range(3000000))
+    pbar = tqdm(range(150000))  # TODO this was originally 3000000
 
     requires_grad(generator, False)
     requires_grad(discriminator, True)
@@ -87,11 +87,11 @@ def train(args, dataset, generator, discriminator):
                     # 'e_optimizer': e_optimizer.state_dict(),
                     'd_optimizer': d_optimizer.state_dict(),
                 },
-                f'style-based-gan/checkpoint/train-iter-{i}.model',
+                f'style-based-gan/checkpoint/train-iter-{i}.pt',
             )
 
             torch.save(
-                g_running.state_dict(), f'style-based-gan/checkpoint/{str(i + 1).zfill(6)}.model'
+                g_running.state_dict(), f'style-based-gan/checkpoint/{str(i + 1).zfill(6)}.pt'
             )
 
             # adjust_lr(g_optimizer, args.lr.get(resolution, 0.001))
@@ -194,7 +194,7 @@ def train(args, dataset, generator, discriminator):
                 f'style-based-gan/sample/{str(i + 1).zfill(6)}.png',
                 nrow=gen_i,
                 normalize=True,
-                range=(-1, 1),
+                value_range=(-1, 1),
             )
 
         # if alpha == 0:

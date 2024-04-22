@@ -106,12 +106,12 @@ def main(args: argparse.Namespace):
         base_classifier = Cifar10ResnetModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (1.0, 2.0, 4.0)
+        bounds_l2 = (0.5, 1.0, 2.0, 4.0)
     elif args.classifier_type == 'vgg-16':
         base_classifier = Cifar10VGGModel(args.classifier_path, device)
         defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
         args.image_size = 32
-        bounds_l2 = (1.0, 2.0, 4.0)
+        bounds_l2 = (0.5, 1.0, 2.0, 4.0)
     elif args.classifier_type == 'resnet-50':
         base_classifier = CelebAResnetModel(args.classifier_path, device)
         defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from)
@@ -156,7 +156,7 @@ def main(args: argparse.Namespace):
 
     # params for L2 naive attacks
     iv_attack = fb.attacks.InversionAttack(distance=fb.distances.l2)
-    bf_attack = fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=128)  # TODO CHECK this number!
+    bf_attack = fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=96)  # TODO CHECK this number!
 
     base_success_rate = torch.empty((2, len(bounds_l2), 0), device=device)
     def_success_rate = torch.empty((2, len(bounds_l2), 0), device=device)
@@ -182,8 +182,8 @@ def main(args: argparse.Namespace):
         # 2 Inversion Attack.
         # adv = list of len(bounds_l2) of tensors B C H W.
         # success = boolean tensor of shape (N_bounds, B)
-        _, _, suc_base_iv = iv_attack(fb_base_model, images, labels.to(device), epsilons=bounds_l2)
-        _, _, suc_def_iv = iv_attack(fb_defense_model, images, labels.to(device), epsilons=bounds_l2)
+        _, _, suc_base_iv = iv_attack(fb_base_model, images, labels.to(device), epsilons=(0.5,))
+        _, _, suc_def_iv = iv_attack(fb_defense_model, images, labels.to(device), epsilons=(0.5,))
 
         # 3 Brute Force Attack with increasing L2 bounds.
         # adv = list of len(bounds_l2) of tensors B C H W.
@@ -192,8 +192,8 @@ def main(args: argparse.Namespace):
         _, adv, suc_def_bf = bf_attack(fb_defense_model, images, labels.to(device), epsilons=bounds_l2)
 
         # cat results
-        suc_base = torch.stack([suc_base_iv, suc_base_bf], dim=0)
-        suc_def = torch.stack([suc_def_iv, suc_def_bf], dim=0)
+        suc_base = torch.stack([suc_base_iv.repeat(len(bounds_l2), 1), suc_base_bf], dim=0)
+        suc_def = torch.stack([suc_def_iv.repeat(len(bounds_l2), 1), suc_def_bf], dim=0)
         base_success_rate, _ = pack([base_success_rate, suc_base], 'd n *')
         def_success_rate, _ = pack([def_success_rate, suc_def], 'd n *')
 
@@ -231,9 +231,8 @@ def main(args: argparse.Namespace):
     res_dict['clean accuracy base'] = cl_accuracy_on_clean
     res_dict['clean accuracy defense'] = def_accuracy_on_clean
 
-    for i, b in enumerate(bounds_l2):
-        res_dict[f'inversion attack l2 bound={b:.2f} success base'] = base_success_rate[0, i].mean().item()
-        res_dict[f'inversion attack l2 bound={b:.2f} success defense'] = def_success_rate[0, i].mean().item()
+    res_dict[f'inversion attack success base'] = base_success_rate[0, 0].mean().item()
+    res_dict[f'inversion attack success defense'] = def_success_rate[0, 0].mean().item()
 
     for i, b in enumerate(bounds_l2):
         # print(f'brute force l2 bound={b:.2f} success base = {base_success_rate[1, i].mean().item()}')
