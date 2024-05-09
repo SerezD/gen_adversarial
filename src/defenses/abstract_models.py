@@ -63,7 +63,7 @@ class BaseClassificationModel(ABC):
 class HLDefenseModel(ABC):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, resample_from: int,
-                 device: str, mean: tuple = None, std: tuple = None):
+                 device: str, mean: tuple = None, std: tuple = None, gaussian_eps: float = 0.):
         """
         Model composed of HL-Autoencoder + CNN.
         The autoencoder is used to pre-process the input samples.
@@ -74,6 +74,7 @@ class HLDefenseModel(ABC):
         :param device: cuda device (or cpu) to load both ae and classifier on
         :param mean: optional param for Normalization and Denormalization operations.
         :param std: optional param for Normalization and Denormalization operations.
+        :param gaussian_eps: preprocess each image with additional gaussian noise before autoencoding.
         """
 
         super().__init__()
@@ -91,6 +92,7 @@ class HLDefenseModel(ABC):
         self.preprocess = self.mean is not None
         self.postprocess = self.mean is not None
 
+        self.gaussian_eps = gaussian_eps
         self.resample_from = resample_from
         self.autoencoder = self.load_autoencoder(autoencoder_path, device)
 
@@ -113,6 +115,19 @@ class HLDefenseModel(ABC):
         """
         pass
 
+    def add_gaussian_noise(self, batch: torch.Tensor) -> torch.Tensor:
+        """
+        randomly add gaussian noise to input batch before preprocessing.
+        """
+
+        b, c, h, w = batch.shape
+
+        b_norm = batch.view(-1).norm(p=2, dim=-1)
+        noise = torch.ones_like(batch).normal_()
+
+        batch = batch + noise * self.gaussian_eps / b_norm.expand((b, 1, 1, 1))
+        return batch.clamp_(0., 1.)
+
     def __call__(self, batch: torch.Tensor, preds_only: bool = True) -> list:
         """
         :param batch: image tensor of shape (B C H W)
@@ -122,6 +137,9 @@ class HLDefenseModel(ABC):
                 1. un-normalized predictions of shape (B, N_CLASSES), computed on the purified images.
                 2. the batch of purified images (B, C, H, W)
         """
+
+        # add additional gaussian noise before any preprocessing.
+        batch = self.add_gaussian_noise(batch)
 
         # preprocessing before autoencoding
         if self.preprocess:

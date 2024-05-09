@@ -1,16 +1,13 @@
-import math
 from argparse import Namespace
 
 from einops import rearrange
-from kornia.augmentation import Normalize, Denormalize
-from kornia.augmentation.container import AugmentationSequential
 import torch
 from torch import nn
 
 from src.classifier.model import ResNet
 from src.defenses.abstract_models import BaseClassificationModel, HLDefenseModel
-from src.hl_autoencoders.NVAE.mine.distributions import DiscMixLogistic
-from src.hl_autoencoders.NVAE.mine.model import AutoEncoder
+from src.hl_autoencoders.NVAE.modules.distributions import DiscMixLogistic, Normal
+from src.hl_autoencoders.NVAE.model import AutoEncoder
 from src.hl_autoencoders.StyleGan_E4E.psp import pSp
 
 """
@@ -18,7 +15,7 @@ Contains all the models for defense, including BaseClassificationModels and HLDe
 """
 
 
-class Cifar10VGGModel(BaseClassificationModel):
+class Cifar10VGGModel(BaseClassificationModel, torch.nn.Module):
 
     def __init__(self, model_path: str, device: str):
         """
@@ -36,12 +33,12 @@ class Cifar10VGGModel(BaseClassificationModel):
         :param device: cuda device (or cpu) to load the model on
         :return: nn.Module of the pretrained classifier
         """
-        cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_vgg16_bn", pretrained=True)
+        cnn = torch.hub.load(model_path, "cifar10_vgg16_bn", source='local', pretrained=True)
         cnn = cnn.to(device).eval()
         return cnn
 
 
-class Cifar10ResnetModel(BaseClassificationModel):
+class Cifar10ResnetModel(BaseClassificationModel, torch.nn.Module):
 
     def __init__(self, model_path: str, device: str):
         """
@@ -59,12 +56,12 @@ class Cifar10ResnetModel(BaseClassificationModel):
         :param device: cuda device (or cpu) to load the model on
         :return: nn.Module of the pretrained classifier
         """
-        cnn = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet32", pretrained=True)
+        cnn = torch.hub.load(model_path, "cifar10_resnet32", source='local', pretrained=True)
         cnn = cnn.to(device).eval()
         return cnn
 
 
-class CelebAResnetModel(BaseClassificationModel):
+class CelebAResnetModel(BaseClassificationModel, torch.nn.Module):
 
     def __init__(self, model_path: str, device: str):
         """
@@ -92,7 +89,7 @@ class CelebAResnetModel(BaseClassificationModel):
 class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
-                 resample_from: int, temperature: float = 0.6):
+                 resample_from: int, temperature: float = 0.6, gaussian_eps: float = 0.):
         """
         Defense model using an NVAE pretrained on Cifar10.
 
@@ -104,10 +101,10 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         assert isinstance(classifier, Cifar10VGGModel) or isinstance(classifier, Cifar10ResnetModel), \
             "invalid classifier passed to Cifar10NVAEDefenseModel"
 
-        # no need for preprocessing, since it is done directly in NVAE forward pass.
-        super().__init__(classifier, autoencoder_path, resample_from, device)
-
         self.temperature = temperature
+
+        # no need for preprocessing, since it is done directly in NVAE forward pass.
+        super().__init__(classifier, autoencoder_path, resample_from, device, gaussian_eps=gaussian_eps)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
@@ -123,8 +120,7 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         # create model
         nvae = AutoEncoder(config['autoencoder'], config['resolution'])
 
-        # nvae.load_state_dict(checkpoint['state_dict'])
-        nvae.load_state_dict(checkpoint['state_dict_adjusted'])
+        nvae.load_state_dict(checkpoint[f'state_dict_temp={self.temperature}'])
         nvae.to(device).eval()
         return nvae
 
@@ -134,15 +130,120 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         :param batch: pre-processed images of shape (B, C, H, W).
         :return: post_precessed purified reconstructions (B, C, H, W)
         """
-        logits = self.autoencoder.purify(batch, self.resample_from, self.temperature)
-        out_dist = DiscMixLogistic(logits)
-        reconstructions = out_dist.sample()
-        return reconstructions
+
+        b = batch.shape[0]
+
+        # preprocessing phase
+        normalized_images = self.autoencoder.normalization(batch)
+        x = self.autoencoder.preprocessing_block(normalized_images)
+
+        # encoding tower phase
+        encoder_combiners_x = {}
+
+        for s in range(self.autoencoder.num_scales - 1, -1, -1):
+
+            scale = self.autoencoder.encoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.autoencoder.groups_per_scale[s]):
+
+                group = scale.get_submodule(f'group_{g}')
+
+                for c in range(self.autoencoder.num_cells_per_group):
+                    x = group.get_submodule(f'cell_{c}')(x)
+
+                # add intermediate x (will be used as combiner input for this scale)
+                if not (s == 0 and g == 0):
+                    encoder_combiners_x[f'{s}:{g}'] = x
+
+            if s > 0:
+                x = scale.get_submodule(f'downsampling')(x)
+
+        # encoder 0
+        x = self.autoencoder.encoder_0(x)
+
+        # encoder q(z_0|x)
+        mu_q, log_sig_q = torch.chunk(self.autoencoder.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
+        dist_enc = Normal(mu_q, log_sig_q)
+        z_0 = dist_enc.mu
+
+        # apply normalizing flows
+        if self.autoencoder.use_nf:
+            z_0 = self.autoencoder.nf_cells.get_submodule('nf_0:0')(z_0)
+
+        # decoding phase
+
+        # start from constant prior
+        x = self.autoencoder.const_prior.expand(b, -1, -1, -1)
+
+        # first combiner (inject z_0)
+        x = self.autoencoder.decoder_combiners.get_submodule('combiner_0:0')(x, z_0)
+
+        latent_idx = 1
+
+        for s in range(self.autoencoder.num_scales):
+
+            scale = self.autoencoder.decoder_tower.get_submodule(f'scale_{s}')
+
+            for g in range(self.autoencoder.groups_per_scale[s]):
+
+                if not (s == 0 and g == 0):
+
+                    # group forward
+                    group = scale.get_submodule(f'group_{g}')
+
+                    for c in range(self.autoencoder.num_cells_per_group):
+                        x = group.get_submodule(f'cell_{c}')(x)
+
+                    # obtain z_i by autoencoding or sampling
+                    dec_sampler = self.autoencoder.dec_sampler.get_submodule(f'sampler_{s}:{g}')
+                    mu_p, log_sig_p = torch.chunk(dec_sampler(x), 2, dim=1)
+
+                    if latent_idx < self.resample_from:
+
+                        enc_combiner = self.autoencoder.encoder_combiners.get_submodule(f'combiner_{s}:{g}')
+                        enc_sampler = self.autoencoder.enc_sampler.get_submodule(f'sampler_{s}:{g}')
+                        mu_q, log_sig_q = torch.chunk(
+                            enc_sampler(enc_combiner(encoder_combiners_x[f'{s}:{g}'], x)),
+                            2, dim=1)
+
+                        # sample z_i as combination of encoder and decoder params
+                        dist_enc = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
+                        z_i = dist_enc.mu
+
+                        # apply NF
+                        if self.autoencoder.use_nf:
+                            z_i = self.autoencoder.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
+
+                    else:
+
+                        dist = Normal(mu_p, log_sig_p, temp=self.temperature)
+                        z_i, _ = dist.sample()
+
+                    # combine x and z_i
+                    x = self.autoencoder.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
+
+                    latent_idx += 1
+
+            # upsampling at the end of each scale
+            if s < self.autoencoder.num_scales - 1:
+                x = scale.get_submodule('upsampling')(x)
+
+        # postprocessing phase
+        x = self.autoencoder.postprocessing_block(x)
+
+        # get logits for mixture
+        logits = self.autoencoder.to_logits(x)
+
+        disc_mix = DiscMixLogistic(logits, img_channels=3, num_bits=8)
+        reconstructions = disc_mix.sample()
+
+        return self.autoencoder.denormalization(reconstructions)
 
 
 class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
-    def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str, device: str, resample_from: int):
+    def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str, device: str, resample_from: int,
+                 gaussian_eps: float = 0.):
         """
         Defense model using an StyleGan pretrained on FFHQ.
         """
@@ -150,7 +251,7 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         mean = (0.5, 0.5, 0.5)
         std = (0.5, 0.5, 0.5)
 
-        super().__init__(classifier, autoencoder_path, resample_from, device, mean, std)
+        super().__init__(classifier, autoencoder_path, resample_from, device, mean, std, gaussian_eps)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
