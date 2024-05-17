@@ -18,7 +18,43 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
 def parse_args():
+    """
+    NVAE 8x3
+    --images_path
+    /media/dserez/datasets/cifar10/validation/
+    --batch_size
+    50
+    --classifier_path
+    /media/dserez/runs/adversarial/CNNs/hub/chenyaofo_pytorch-cifar-models_master
+    --classifier_type
+    vgg-16
+    --autoencoder_path
+    /media/dserez/runs/NVAE/cifar10/8x3/last.pt
+    --autoencoder_name
+    NVAE_3x8
+    --resample_from
+    18
+    --results_folder
+    ./tmp/
 
+    STYLEGAN
+    --images_path
+    /media/dserez/datasets/celeba_hq_gender/validation/
+    --batch_size
+    25
+    --classifier_path
+    /media/dserez/runs/adversarial/CNNs/resnet50_celeba_hq_gender/best.pt
+    --classifier_type
+    resnet-50
+    --autoencoder_path
+    /media/dserez/runs/stylegan2/inversions/e4e_ffhq_encoder.pt
+    --autoencoder_name
+    Stylegan
+    --interpolation_alphas
+    0.05 0.11 0.16 0.22 0.27 0.33 0.38 0.44 0.5 0.55 0.61 0.66 0.72 0.77 0.83 0.88 0.94 1.0
+    --results_folder
+    ./tmp/
+    """
     parser = argparse.ArgumentParser('Test the defense model with some sanity checks')
 
     parser.add_argument('--images_path', type=str, required=True,
@@ -38,8 +74,9 @@ def parse_args():
     parser.add_argument('--autoencoder_name', type=str, required=True,
                         help='used to determine results folder')
 
-    parser.add_argument('--resample_from', type=int, required=True,
-                        help='hierarchy level where re-sampling defense starts')
+    parser.add_argument('--interpolation_alphas', type=float, required=True, nargs='+',
+                        help='For each hierarchy, degree of interpolation between reconstruction code '
+                             '(alpha=0) and new sampled code (alpha=1).')
 
     parser.add_argument('--results_folder', type=str, required=True,
                         help='folder to save .pickle file with results')
@@ -70,25 +107,25 @@ def main(args: argparse.Namespace):
     # load pre-trained models
     if args.classifier_type == 'resnet-32':
         bounds_l2 = (0.5, 1.0, 2.0, 4.0)
-        gaussian_eps = bounds_l2[-1]
+        initial_noise_eps = 4.0
         args.image_size = 32
         base_classifier = Cifar10ResnetModel(args.classifier_path, device)
-        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from,
-                                                gaussian_eps=gaussian_eps)
+        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path,
+                                                args.interpolation_alphas, initial_noise_eps, device)
     elif args.classifier_type == 'vgg-16':
         bounds_l2 = (0.5, 1.0, 2.0, 4.0)
-        gaussian_eps = bounds_l2[-1]
+        initial_noise_eps = 4.0
         args.image_size = 32
         base_classifier = Cifar10VGGModel(args.classifier_path, device)
-        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from,
-                                                gaussian_eps=gaussian_eps)
+        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path,
+                                                args.interpolation_alphas, initial_noise_eps, device)
     elif args.classifier_type == 'resnet-50':
         bounds_l2 = (0.5, 1.0, 2.0, 4.0)
-        gaussian_eps = bounds_l2[-1]
+        initial_noise_eps = 4.0
         args.image_size = 256
         base_classifier = CelebAResnetModel(args.classifier_path, device)
-        defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from,
-                                                   gaussian_eps=gaussian_eps)
+        defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path,
+                                                   args.interpolation_alphas, initial_noise_eps, device)
     else:
         raise ValueError(f'Unknown classifier type: {args.classifier_type}')
 

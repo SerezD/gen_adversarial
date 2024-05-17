@@ -35,8 +35,12 @@ def parse_args():
     parser.add_argument('--autoencoder_name', type=str, required=True,
                         help='used to determine results folder')
 
-    parser.add_argument('--resample_from', type=int, required=True,
-                        help='hierarchy level where re-sampling defense starts')
+    parser.add_argument('--interpolation_alphas', type=float, required=True, nargs='+',
+                        help='For each hierarchy, degree of interpolation between reconstruction code '
+                             '(alpha=0) and new sampled code (alpha=1).')
+
+    parser.add_argument('--initial_noise_eps', type=float, default=0.,
+                        help='l2 bound for perturbation of initial images (before purification)')
 
     parser.add_argument('--results_folder', type=str, required=True,
                         help='folder to save .pickle file with results')
@@ -46,7 +50,7 @@ def parse_args():
     args = parser.parse_args()
 
     # create folder
-    args.results_folder = f'{args.results_folder}/{args.autoencoder_name}_{args.classifier_type}/'
+    args.results_folder = f'{args.results_folder}/{args.autoencoder_name}_noise:{args.initial_noise_eps}_{args.classifier_type}/'
     if not os.path.exists(args.results_folder):
         os.makedirs(args.results_folder)
 
@@ -67,26 +71,26 @@ def main(args: argparse.Namespace):
 
     # load pre-trained models
     if args.classifier_type == 'resnet-32':
-        bounds_l2 = (0.5, 1.0, 2.0, 4.0)
-        gaussian_eps = bounds_l2[-1]
+        bounds_l2 = (0.1, 0.2, 0.5, 1.0)
         args.image_size = 32
         base_classifier = Cifar10ResnetModel(args.classifier_path, device)
-        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from,
-                                                gaussian_eps=gaussian_eps)
+        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path,
+                                                args.interpolation_alphas, args.initial_noise_eps, device,
+                                                temperature=0.4 if args.initial_noise_eps > 0 else 0.6)
     elif args.classifier_type == 'vgg-16':
-        bounds_l2 = (0.5, 1.0, 2.0, 4.0)
-        gaussian_eps = bounds_l2[-1]
+        bounds_l2 = (0.1, 0.2, 0.5, 1.0)
         args.image_size = 32
         base_classifier = Cifar10VGGModel(args.classifier_path, device)
-        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from,
-                                                gaussian_eps=gaussian_eps)
+        defense_model = Cifar10NVAEDefenseModel(base_classifier, args.autoencoder_path,
+                                                args.interpolation_alphas, args.initial_noise_eps, device,
+                                                temperature=0.4 if args.initial_noise_eps > 0 else 0.6)
+
     elif args.classifier_type == 'resnet-50':
         bounds_l2 = (0.5, 1.0, 2.0, 4.0)
-        gaussian_eps = bounds_l2[-1]
         args.image_size = 256
         base_classifier = CelebAResnetModel(args.classifier_path, device)
-        defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path, device, args.resample_from,
-                                                   gaussian_eps=gaussian_eps)
+        defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path,
+                                                   args.interpolation_alphas, args.initial_noise_eps, device)
     else:
         raise ValueError(f'Unknown classifier type: {args.classifier_type}')
 
@@ -105,8 +109,10 @@ def main(args: argparse.Namespace):
 
     # select attack
     if args.attack == 'C&W':
-        # attack = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=9, steps=10000)
-        attack = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=2, steps=2048)  # TODO CHECK
+        attack = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=2,
+                                                  steps=2048,
+                                                  confidence=1e-2,
+                                                  initial_const=3.0)
     else:
         # DeepFool with base params
         attack = fb.attacks.L2DeepFoolAttack(steps=50,  candidates=10, overshoot=0.02)
@@ -159,7 +165,7 @@ def main(args: argparse.Namespace):
                     plt.imshow(display)
                     plt.axis(False)
                     plt.title(f'originals, adversarial and cleaned images at L2={b:.2f}')
-                    plt.savefig(f'{args.plots_folder}/resample={args.resample_from}_bound={b:.2f}_batch={b_idx}.png')
+                    plt.savefig(f'{args.plots_folder}/bound={b:.2f}_batch={b_idx}.png')
                     plt.close()
 
     # compute and save final results
@@ -171,7 +177,7 @@ def main(args: argparse.Namespace):
         res_dict[f'l2 bound={b:.2f} success on defense'] = def_success_rate[i].mean().item()
 
     print('Opening file...')
-    with open(f'{args.results_folder}results_{args.attack}_resample:{args.resample_from}.json', 'w') as f:
+    with open(f'{args.results_folder}results_{args.attack}.json', 'w') as f:
          json.dump(res_dict, f)
 
 

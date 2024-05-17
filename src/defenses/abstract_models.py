@@ -62,22 +62,26 @@ class BaseClassificationModel(ABC):
 
 class HLDefenseModel(ABC):
 
-    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, resample_from: int,
-                 device: str, mean: tuple = None, std: tuple = None, gaussian_eps: float = 0.):
+    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str,
+                 interpolation_alphas: tuple, initial_noise_eps: float = 0.0,
+                 device: str = 'cpu', mean: tuple = None, std: tuple = None):
         """
         Model composed of HL-Autoencoder + CNN.
         The autoencoder is used to pre-process the input samples.
 
         :param classifier: pretrained classification model.
         :param autoencoder_path: absolute path to the pretrained autoencoder.
-        :param resample_from: latent scale from where codes start to be resampled for purification.
+        :param interpolation_alphas: express, for each hierarchy, the degree of interpolation between
+        reconstruction code (alpha=0) and new sampled code (alpha=1).
+        :param initial_noise_eps: l2 bound for optional noise randomly added to images before purification.
         :param device: cuda device (or cpu) to load both ae and classifier on
         :param mean: optional param for Normalization and Denormalization operations.
         :param std: optional param for Normalization and Denormalization operations.
-        :param gaussian_eps: preprocess each image with additional gaussian noise before autoencoding.
         """
 
         super().__init__()
+
+        self.eps = initial_noise_eps
 
         self.device = device
 
@@ -92,8 +96,7 @@ class HLDefenseModel(ABC):
         self.preprocess = self.mean is not None
         self.postprocess = self.mean is not None
 
-        self.gaussian_eps = gaussian_eps
-        self.resample_from = resample_from
+        self.interpolation_alphas = interpolation_alphas
         self.autoencoder = self.load_autoencoder(autoencoder_path, device)
 
     @abstractmethod
@@ -115,18 +118,21 @@ class HLDefenseModel(ABC):
         """
         pass
 
-    def add_gaussian_noise(self, batch: torch.Tensor) -> torch.Tensor:
-        """
-        randomly add gaussian noise to input batch before preprocessing.
-        """
+    def add_gaussian_noise(self, x: torch.Tensor):
 
-        b, c, h, w = batch.shape
+        # Generate Gaussian noise with the same shape as x
+        noise = torch.ones_like(x).normal_(0., 1.)
 
-        b_norm = batch.view(-1).norm(p=2, dim=-1)
-        noise = torch.ones_like(batch).normal_()
+        # Calculate the L2 norm of the noise
+        noise_norm = torch.norm(noise.view(noise.size(0), -1), dim=1, keepdim=True)
 
-        batch = batch + noise * self.gaussian_eps / b_norm.expand((b, 1, 1, 1))
-        return batch.clamp_(0., 1.)
+        # Scale the noise to have the L2 norm equal to eps
+        scaled_noise = noise * (self.eps / noise_norm.view(-1, 1, 1, 1))
+
+        # Add the scaled noise to the original image
+        x_noisy = x + scaled_noise
+
+        return x_noisy
 
     def __call__(self, batch: torch.Tensor, preds_only: bool = True) -> list:
         """
@@ -137,8 +143,6 @@ class HLDefenseModel(ABC):
                 1. un-normalized predictions of shape (B, N_CLASSES), computed on the purified images.
                 2. the batch of purified images (B, C, H, W)
         """
-
-        # add additional gaussian noise before any preprocessing.
         batch = self.add_gaussian_noise(batch)
 
         # preprocessing before autoencoding

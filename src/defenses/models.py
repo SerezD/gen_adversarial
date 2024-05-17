@@ -88,12 +88,11 @@ class CelebAResnetModel(BaseClassificationModel, torch.nn.Module):
 
 class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
-    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, device: str,
-                 resample_from: int, temperature: float = 0.6, gaussian_eps: float = 0.):
+    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, interpolation_alphas: tuple,
+                 initial_noise_eps: float = 0.0, device: str = 'cpu', temperature: float = 0.6):
         """
         Defense model using an NVAE pretrained on Cifar10.
 
-        :param resample_from: hierarchy level from which resampling starts.
         :param temperature: temperature for sampling.
         """
 
@@ -104,7 +103,7 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         self.temperature = temperature
 
         # no need for preprocessing, since it is done directly in NVAE forward pass.
-        super().__init__(classifier, autoencoder_path, resample_from, device, gaussian_eps=gaussian_eps)
+        super().__init__(classifier, autoencoder_path, interpolation_alphas, initial_noise_eps, device)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
@@ -164,7 +163,13 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         # encoder q(z_0|x)
         mu_q, log_sig_q = torch.chunk(self.autoencoder.enc_sampler.get_submodule('sampler_0:0')(x), 2, dim=1)
         dist_enc = Normal(mu_q, log_sig_q)
-        z_0 = dist_enc.mu
+
+        # decoder p(z_0)
+        dist_dec = Normal(mu=torch.zeros_like(mu_q),
+                          log_sigma=torch.zeros_like(log_sig_q),
+                          temp=self.temperature)
+
+        z_0 = (1 - self.interpolation_alphas[0]) * dist_enc.mu + self.interpolation_alphas[0] * dist_dec.sample()[0]
 
         # apply normalizing flows
         if self.autoencoder.use_nf:
@@ -194,30 +199,25 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
                     for c in range(self.autoencoder.num_cells_per_group):
                         x = group.get_submodule(f'cell_{c}')(x)
 
-                    # obtain z_i by autoencoding or sampling
+                    # obtain z_i interpolating encoder q(z_i|x, z<i) and decoder p(z_i|z<i)
+                    enc_combiner = self.autoencoder.encoder_combiners.get_submodule(f'combiner_{s}:{g}')
+                    enc_sampler = self.autoencoder.enc_sampler.get_submodule(f'sampler_{s}:{g}')
+                    mu_q, log_sig_q = torch.chunk(
+                        enc_sampler(enc_combiner(encoder_combiners_x[f'{s}:{g}'], x)),
+                        2, dim=1)
+
                     dec_sampler = self.autoencoder.dec_sampler.get_submodule(f'sampler_{s}:{g}')
                     mu_p, log_sig_p = torch.chunk(dec_sampler(x), 2, dim=1)
 
-                    if latent_idx < self.resample_from:
+                    dist_enc = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
+                    dist_dec = Normal(mu_p, log_sig_p, temp=self.temperature)
 
-                        enc_combiner = self.autoencoder.encoder_combiners.get_submodule(f'combiner_{s}:{g}')
-                        enc_sampler = self.autoencoder.enc_sampler.get_submodule(f'sampler_{s}:{g}')
-                        mu_q, log_sig_q = torch.chunk(
-                            enc_sampler(enc_combiner(encoder_combiners_x[f'{s}:{g}'], x)),
-                            2, dim=1)
+                    z_i = (1 - self.interpolation_alphas[latent_idx]) * dist_enc.mu
+                    z_i += self.interpolation_alphas[latent_idx] * dist_dec.sample()[0]
 
-                        # sample z_i as combination of encoder and decoder params
-                        dist_enc = Normal(mu_p + mu_q, log_sig_p + log_sig_q)
-                        z_i = dist_enc.mu
-
-                        # apply NF
-                        if self.autoencoder.use_nf:
-                            z_i = self.autoencoder.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
-
-                    else:
-
-                        dist = Normal(mu_p, log_sig_p, temp=self.temperature)
-                        z_i, _ = dist.sample()
+                    # apply NF
+                    if self.autoencoder.use_nf:
+                        z_i = self.autoencoder.nf_cells.get_submodule(f'nf_{s}:{g}')(z_i)
 
                     # combine x and z_i
                     x = self.autoencoder.decoder_combiners.get_submodule(f'combiner_{s}:{g}')(x, z_i)
@@ -242,8 +242,10 @@ class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
 class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
-    def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str, device: str, resample_from: int,
-                 gaussian_eps: float = 0.):
+    def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str,
+                 interpolation_alphas: tuple,
+                 initial_noise_eps: float = 0.0,
+                 device: str = 'cpu'):
         """
         Defense model using an StyleGan pretrained on FFHQ.
         """
@@ -251,7 +253,7 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         mean = (0.5, 0.5, 0.5)
         std = (0.5, 0.5, 0.5)
 
-        super().__init__(classifier, autoencoder_path, resample_from, device, mean, std, gaussian_eps)
+        super().__init__(classifier, autoencoder_path, interpolation_alphas, initial_noise_eps, device, mean, std)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
@@ -283,15 +285,17 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         device = codes.device
 
         codes = rearrange(codes, 'b n d -> n b d')
-        codes = [c for c in codes]
 
         # sample gaussian noise, then get new styles by mixing with codes.
         noises = torch.normal(0, 1, (n_codes, b, d), device=device)
-        styles = [self.autoencoder.decoder.style(n) for n in noises]
-        codes = codes[:self.resample_from] + styles[self.resample_from:]
+        styles = torch.stack([self.autoencoder.decoder.style(n) for n in noises], dim=0)
+
+        # interpolate codes and styles
+        alphas = torch.tensor(self.interpolation_alphas, device=device).view(-1, 1, 1)
+        codes = (1 - alphas) * codes + alphas * styles
 
         # put codes in the correct shape
-        codes = rearrange(torch.stack(codes), 'n b d -> b n d')
+        codes = rearrange(codes, 'n b d -> b n d')
 
         # decode and de-normalize
         reconstructions = self.autoencoder.decode(codes)
