@@ -479,6 +479,7 @@ class EncodeConvBlockN(nn.Module):
 
         return out
 
+
 class encoder(nn.Module):
     def __init__(self, input_channel, out_channel):
         super(encoder, self).__init__()
@@ -517,19 +518,26 @@ class Generator(nn.Module):
     def __init__(self, fused=True, output_size: int = 128):
         super().__init__()
 
-        convs = [
-            StyledConvBlock(512, 512, 3, 1, initial=True),  # 4
-            StyledConvBlock(512, 512, 3, 1, upsample=True),  # 8
-            StyledConvBlock(512, 512, 3, 1, upsample=True),  # 16
-            StyledConvBlock(512, 256, 3, 1, upsample=True, fused=fused),  # 32
-            StyledConvBlock(256, 256, 3, 1, upsample=True, fused=fused),  # 64
-            StyledConvBlock(256, 128, 3, 1, upsample=True, fused=fused),  # 128
-        ]
-        if output_size == 256:
-            convs += [
-                StyledConvBlock(128, 64, 3, 1, upsample=True, fused=fused),
+        if output_size == 32:
+            convs = [
+                StyledConvBlock(512, 512, 3, 1, initial=True),  # 4
+                StyledConvBlock(512, 256, 3, 1, upsample=True),  # 8
+                StyledConvBlock(256, 128, 3, 1, upsample=True),  # 16
+                StyledConvBlock(128, 64, 3, 1, upsample=True, fused=fused),  # 32
             ]
+        elif output_size == 256:
 
+            convs = [
+                StyledConvBlock(512, 512, 3, 1, initial=True),  # 4
+                StyledConvBlock(512, 512, 3, 1, upsample=True),  # 8
+                StyledConvBlock(512, 512, 3, 1, upsample=True),  # 16
+                StyledConvBlock(512, 256, 3, 1, upsample=True, fused=fused),  # 32
+                StyledConvBlock(256, 256, 3, 1, upsample=True, fused=fused),  # 64
+                StyledConvBlock(256, 128, 3, 1, upsample=True, fused=fused),  # 128
+                StyledConvBlock(128, 64, 3, 1, upsample=True, fused=fused),  # 256
+            ]
+        else:
+            raise NotImplementedError(f"Output size {output_size} is not supported")
 
         # StyledConvBlock(64, 32, 3, 1, upsample=True, fused=fused),  # 512
         # StyledConvBlock(32, 16, 3, 1, upsample=True, fused=fused),  # 1024
@@ -538,7 +546,7 @@ class Generator(nn.Module):
             convs
         )
 
-        self.to_rgb = EqualConv2d(128 if output_size < 256 else 64, 3, 1)
+        self.to_rgb = EqualConv2d(64, 3, 1)
         # self.fc = nn.Sequential(
         #     nn.InstanceNorm2d(num_features=512),
         #     nn.LeakyReLU(0.2))

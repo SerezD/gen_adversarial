@@ -49,6 +49,7 @@ def adjust_lr(optimizer, lr):
         group['lr'] = lr
         # print(group['lr'])
 
+
 def train(args, dataset, generator, discriminator):
     step = int(math.log2(args.init_size)) - 2
     resolution = 4 * 2 ** step
@@ -87,11 +88,11 @@ def train(args, dataset, generator, discriminator):
                     # 'e_optimizer': e_optimizer.state_dict(),
                     'd_optimizer': d_optimizer.state_dict(),
                 },
-                f'style-based-gan/checkpoint/train-iter-{i}.pt',
+                f'{CKPT_PATH}/train-iter-{i}.pt',
             )
 
             torch.save(
-                g_running.state_dict(), f'style-based-gan/checkpoint/{str(i + 1).zfill(6)}.pt'
+                g_running.state_dict(), f'{CKPT_PATH}/{str(i + 1).zfill(6)}.pt'
             )
 
             # adjust_lr(g_optimizer, args.lr.get(resolution, 0.001))
@@ -113,9 +114,6 @@ def train(args, dataset, generator, discriminator):
         real_predict = real_predict.mean() - 0.001 * (real_predict ** 2).mean()
         (-real_predict).backward()
 
-        # TODO here downsampling for Encoder is DONE
-        #   CHECK OUT
-        #   STYLEGAN (initial image 256, kernel 8 --> 32)
         _, _, fake_image = generator(F.avg_pool2d(real_image, KERNEL_SIZE))
         fake_predict = discriminator(fake_image)
 
@@ -189,9 +187,10 @@ def train(args, dataset, generator, discriminator):
                         )[2].data.cpu()
                     )
 
+
             utils.save_image(
                 torch.cat(images, 0),
-                f'style-based-gan/sample/{str(i + 1).zfill(6)}.png',
+                f'{PLOTS_PATH}/{str(i + 1).zfill(6)}.png',
                 nrow=gen_i,
                 normalize=True,
                 value_range=(-1, 1),
@@ -221,9 +220,6 @@ def train(args, dataset, generator, discriminator):
 
 
 if __name__ == '__main__':
-
-    code_size = 512
-    n_critic = 1
 
     parser = argparse.ArgumentParser(description='Progressive Growing of GANs')
 
@@ -268,17 +264,30 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    #generator = nn.DataParallel(StyledGenerator(code_size)).cuda()
-    #discriminator = nn.DataParallel(Discriminator()).cuda()
     # TODO
     #   KERNEL_SIZE for DOWNSAMPLING
-    KERNEL_SIZE = 8
+    #   CELEB-A 256 // 8 -> 32
+    #   CIFAR-10  32 // 2 -> 16
+    KERNEL_SIZE = 2 if args.init_size == 32 else 8
+    code_size = 512
+    n_critic = 1
+
+    base_path = f'a_vae_cifar10' if args.init_size == 32 else f'a_vae_celeba'
+
+    PLOTS_PATH = f'{base_path}/plots'
+    CKPT_PATH = f'{base_path}/checkpoints'
+
+    if not os.path.exists(PLOTS_PATH):
+        os.makedirs(PLOTS_PATH)
+
+    if not os.path.exists(CKPT_PATH):
+        os.makedirs(CKPT_PATH)
+
     generator = StyledGenerator(code_size, args.init_size // KERNEL_SIZE, args.init_size).cuda()
     discriminator = Discriminator(args.init_size).cuda()
     g_running = StyledGenerator(code_size, args.init_size // KERNEL_SIZE, args.init_size).cuda()
     g_running.train(False)
-    # g_checkpoint = torch.load('style-based-gan/checkpoint/080002.model')
-    # g_running.load_state_dict(g_checkpoint)
+
     class_loss = nn.CrossEntropyLoss()
 
     g_optimizer = optim.Adam(
@@ -323,6 +332,6 @@ if __name__ == '__main__':
 
     args.gen_sample = {512: (8, 4), 1024: (4, 2)}
 
-    args.batch_default = 32
+    args.batch_default = 32 if args.init_size == 256 else 256
 
     train(args, dataset, generator, discriminator)
