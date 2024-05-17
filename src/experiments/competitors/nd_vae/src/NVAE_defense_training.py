@@ -6,6 +6,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
+import os
 
 from src.experiments.competitors.nd_vae.src.models.NVAE_utils import DiscMixLogistic
 
@@ -18,6 +19,11 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def NVAE_Defense_training(test_name,vae_model,train_dataset,batch_size,n_epochs,lr,pre_trained=False):
 
 
+    if not os.path.exists(f'./{test_name}/model_parameters'):
+        os.makedirs(f'./{test_name}/model_parameters')
+
+    if not os.path.exists(f'./{test_name}/figures'):
+        os.makedirs(f'./{test_name}/figures')
 
     print('Training...')
 
@@ -87,7 +93,7 @@ def NVAE_Defense_training(test_name,vae_model,train_dataset,batch_size,n_epochs,
         ).permute(1, 2, 0).cpu().numpy()
 
         plt.imshow(display)
-        plt.savefig(f'./figures/{test_name}_epoch={epoch}.png')
+        plt.savefig(f'./{test_name}/figures/epoch={epoch}.png')
         plt.close()
 
         #Record average losses for epoch
@@ -100,7 +106,7 @@ def NVAE_Defense_training(test_name,vae_model,train_dataset,batch_size,n_epochs,
 
     print("############ Saving Models... ##########")
 
-    torch.save(vae_model.state_dict(), './model_parameters/'+ test_name +'_vae.pth')
+    torch.save(vae_model.state_dict(), f'./{test_name}/model_parameters/nd_vae.pth')
 
     print("################   Done.   ##############")
 

@@ -466,7 +466,7 @@ class Decoder_group(nn.Module):
         
 
 class Decoder_tower(nn.Module):
-    def __init__(self,in_channels,num_of_scales,groups_per_scale,cells_per_group,encoder_channels,num_of_preproc_blocks):
+    def __init__(self,in_channels,num_of_scales,groups_per_scale,cells_per_group,encoder_channels,input_dim):
         super(Decoder_tower,self).__init__()     
         self.in_channels = in_channels
         #Must be the input channels to the encoder, used for creating combiner cell
@@ -483,8 +483,8 @@ class Decoder_tower(nn.Module):
         #Trainable parameter for combining initial encoder input
         #TODO Double check the dimensions for h
         #num_of_preproc_blocks = sqrt(encoder_channels)#encoder_channels // 2
-        h_scaling = 2**(num_of_scales)
-        h_size = (current_channels, max(current_channels // h_scaling,4), max(current_channels // h_scaling,4))
+        h_scaling = 2**(num_of_scales + 1)
+        h_size = (current_channels, max(input_dim // h_scaling,4), max(input_dim // h_scaling,4))
         self.h = nn.Parameter(torch.rand(size=h_size), requires_grad=True).unsqueeze(0).to(device) # Unsqueeze to match 4-dim data
 
         #Initial combiner cell for first-encoding z and parameter h
@@ -635,7 +635,7 @@ class Sampler(nn.Module):
 
 
 class Defence_NVAE(nn.Module):
-    def __init__(self,x_channels,encoding_channels,pre_proc_groups,scales,groups,cells):
+    def __init__(self,x_channels,encoding_channels,pre_proc_groups,scales,groups,cells, input_dim):
         super(Defence_NVAE,self).__init__()
 
         self.initial_chans = encoding_channels
@@ -653,7 +653,7 @@ class Defence_NVAE(nn.Module):
         self.encoder = Encoder_tower(current_chans,scales,groups,cells,encoding_channels)
         current_chans = self.encoder.out_channels
 
-        self.decoder = Decoder_tower(current_chans,scales,groups,cells,encoding_channels,pre_proc_groups)
+        self.decoder = Decoder_tower(current_chans,scales,groups,cells,encoding_channels,input_dim)
         current_chans = self.decoder.out_channels
         #TODO should I use encoding_channels or current_chans
         self.post_proc = Postproc_tower(encoding_channels,self.pre_proc.groups,cells,self.pre_proc.groups)
@@ -683,7 +683,7 @@ class Defence_NVAE(nn.Module):
         reconstructions = DiscMixLogistic(recon_x, img_channels=3, num_bits=8).log_prob(x)
         recon_loss = - torch.sum(reconstructions, dim=1)
 
-        balanced_kl, kl_coeffs, kl_vals = kl_balancer(kl_all, kl_coeff, kl_balance=True, alpha_i=alpha_i)
+        balanced_kl, kl_coeffs, kl_vals = kl_balancer(kl_all, kl_coeff, balance=True, alpha=alpha_i)
 
         nelbo_batch = recon_loss + balanced_kl
         loss = torch.mean(nelbo_batch)
@@ -737,102 +737,102 @@ class Defence_NVAE(nn.Module):
     not the same function used in the Defense VAE
 '''
 
-def train_NVAE(epochs=10,lr=1e-3,batch_size=128):
-
-
-    """
-    Create dataloaders to feed data into the neural network
-    Default MNIST dataset is used and standard train/test split is performed
-    """
-
-    train_transform = transforms.Compose([
-        transforms.Pad(padding=2),
-        transforms.ToTensor(),
-        #Binarize(),
-    ])
-
-    test_transform = transforms.Compose([
-        transforms.Pad(padding=2),
-        transforms.ToTensor(),
-        #Binarize(),
-    ])
-
-    train_loader = torch.utils.data.DataLoader(
-        datasets.FashionMNIST('data', train=True, download=True,
-                        transform=train_transform),#transforms.ToTensor()),
-        batch_size=batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(
-        datasets.FashionMNIST('data', train=False, transform=test_transform),#transforms.ToTensor()),
-        batch_size=1)
-
-    """
-    Initialize the network and the Adam optimizer
-    """
-    #mnist is a single channel
-    x_channels = 1
-    pre_proc_groups = 2
-    encoding_channels=4
-    scales=2
-    groups=2
-    cells=2
-
-    net = Defence_NVAE(x_channels,encoding_channels,pre_proc_groups,scales,groups,cells).to(device)
-    optimizer =  torch.optim.Adamax(net.parameters(), lr, weight_decay=1e-2, eps=1e-3)
-
-
-    """
-    Training the network for a given number of epochs
-    The loss after every epoch is printed
-    """
-    #Count steps for annealing purposes
-    global_step = 0
-    num_total_iter = epochs * len(train_loader)
-
-    for epoch in range(epochs):
-        print("Epoch: ",epoch+1,"/",epochs)
-        for idx, data in enumerate(tqdm(train_loader), 0):
-
-            imgs, _ = data
-            #imgs = imgs.to(device)
-            imgs = imgs.to(device)
-
-            # Feeding a batch of images into the network to obtain the output image, mu, and logVar
-            out, log_q, log_p, kl_all, kl_diag = net(imgs)
-
-            loss, _, _ = net.loss(out,imgs,log_q, log_p, kl_all, kl_diag, global_step,num_total_iter)
-
-            # Backpropagation based on the loss
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            global_step += 1
-
-        print('Epoch {}: Loss {}'.format(epoch+1, loss))
-
-
-
-    """
-    The following part takes a random image from test loader to feed into the VAE.
-    Both the original image and generated image from the distribution are shown.
-    """
-    sample_count = 10
-    image_count = 1
-    net.eval()
-    with torch.no_grad():
-        for data in random.sample(list(test_loader), sample_count):
-            imgs, _ = data
-            imgs = imgs.to(device)
-            img = np.transpose(imgs[0].cpu().numpy(), [1,2,0])
-            plt.subplot(121)
-            plt.imshow(np.squeeze(img))
-            out = net.generate_sample(imgs)
-            outimg = np.transpose(out[0].cpu().numpy(), [1,2,0])
-            plt.subplot(122)
-            plt.imshow(np.squeeze(outimg))
-            plt.savefig('../results/nvae_examples/nvae_examples'+str(image_count)+'.png')
-            plt.clf()
-            image_count += 1
-
-
-    # Save model parameters
-    torch.save(net.state_dict(), '../model_parameters/NVAE_mnist.pth')
+# def train_NVAE(epochs=10,lr=1e-3,batch_size=128):
+#
+#
+#     """
+#     Create dataloaders to feed data into the neural network
+#     Default MNIST dataset is used and standard train/test split is performed
+#     """
+#
+#     train_transform = transforms.Compose([
+#         transforms.Pad(padding=2),
+#         transforms.ToTensor(),
+#         #Binarize(),
+#     ])
+#
+#     test_transform = transforms.Compose([
+#         transforms.Pad(padding=2),
+#         transforms.ToTensor(),
+#         #Binarize(),
+#     ])
+#
+#     train_loader = torch.utils.data.DataLoader(
+#         datasets.FashionMNIST('data', train=True, download=True,
+#                         transform=train_transform),#transforms.ToTensor()),
+#         batch_size=batch_size, shuffle=True)
+#     test_loader = torch.utils.data.DataLoader(
+#         datasets.FashionMNIST('data', train=False, transform=test_transform),#transforms.ToTensor()),
+#         batch_size=1)
+#
+#     """
+#     Initialize the network and the Adam optimizer
+#     """
+#     #mnist is a single channel
+#     x_channels = 1
+#     pre_proc_groups = 2
+#     encoding_channels=4
+#     scales=2
+#     groups=2
+#     cells=2
+#
+#     net = Defence_NVAE(x_channels,encoding_channels,pre_proc_groups,scales,groups,cells).to(device)
+#     optimizer =  torch.optim.Adamax(net.parameters(), lr, weight_decay=1e-2, eps=1e-3)
+#
+#
+#     """
+#     Training the network for a given number of epochs
+#     The loss after every epoch is printed
+#     """
+#     #Count steps for annealing purposes
+#     global_step = 0
+#     num_total_iter = epochs * len(train_loader)
+#
+#     for epoch in range(epochs):
+#         print("Epoch: ",epoch+1,"/",epochs)
+#         for idx, data in enumerate(tqdm(train_loader), 0):
+#
+#             imgs, _ = data
+#             #imgs = imgs.to(device)
+#             imgs = imgs.to(device)
+#
+#             # Feeding a batch of images into the network to obtain the output image, mu, and logVar
+#             out, log_q, log_p, kl_all, kl_diag = net(imgs)
+#
+#             loss, _, _ = net.loss(out,imgs,log_q, log_p, kl_all, kl_diag, global_step,num_total_iter)
+#
+#             # Backpropagation based on the loss
+#             optimizer.zero_grad()
+#             loss.backward()
+#             optimizer.step()
+#             global_step += 1
+#
+#         print('Epoch {}: Loss {}'.format(epoch+1, loss))
+#
+#
+#
+#     """
+#     The following part takes a random image from test loader to feed into the VAE.
+#     Both the original image and generated image from the distribution are shown.
+#     """
+#     sample_count = 10
+#     image_count = 1
+#     net.eval()
+#     with torch.no_grad():
+#         for data in random.sample(list(test_loader), sample_count):
+#             imgs, _ = data
+#             imgs = imgs.to(device)
+#             img = np.transpose(imgs[0].cpu().numpy(), [1,2,0])
+#             plt.subplot(121)
+#             plt.imshow(np.squeeze(img))
+#             out = net.generate_sample(imgs)
+#             outimg = np.transpose(out[0].cpu().numpy(), [1,2,0])
+#             plt.subplot(122)
+#             plt.imshow(np.squeeze(outimg))
+#             plt.savefig('../results/nvae_examples/nvae_examples'+str(image_count)+'.png')
+#             plt.clf()
+#             image_count += 1
+#
+#
+#     # Save model parameters
+#     torch.save(net.state_dict(), '../model_parameters/NVAE_mnist.pth')

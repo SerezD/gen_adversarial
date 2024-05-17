@@ -23,30 +23,39 @@ def kl_per_group(kl_all):
 
 
 
-def kl_balancer(kl_all, kl_coeff=1.0, kl_balance=False, alpha_i=None):
-    if kl_balance and kl_coeff < 1.0:
-        #alpha_i = alpha_i.unsqueeze(0)
-        alpha_i = alpha_i[1:]
-        alpha_i = alpha_i.unsqueeze(0)
+def kl_balancer(kl_unbalanced_terms: list, beta: float = 1.0, balance: bool = False,
+                alpha: torch.Tensor = None):
 
-        kl_all = torch.stack(kl_all, dim=1)
-        kl_coeff_i, kl_vals = kl_per_group(kl_all)
-        total_kl = torch.sum(kl_coeff_i)
+    if balance and beta < 1.0:
 
-        kl_coeff_i = kl_coeff_i[0]
-        kl_coeff_i = kl_coeff_i / alpha_i * total_kl
-        kl_coeff_i = kl_coeff_i / torch.mean(kl_coeff_i, dim=1, keepdim=True)
-        kl = torch.sum(kl_all * kl_coeff_i.detach(), dim=1)
+        # done only during training warmup phase
+        kl_unbalanced_terms = torch.stack(kl_unbalanced_terms, dim=0)
+        device = kl_unbalanced_terms.device
+        alpha = alpha.to(device)  # terms depending on groups
+
+        kl_terms = torch.mean(kl_unbalanced_terms, dim=0)  # mean on batch
+
+        # proportional to kl_terms (on all devices)
+        kl_coefficients = torch.mean(torch.abs(kl_unbalanced_terms), dim=0, keepdim=True)
+
+        # set coefficients as summing to num_groups
+        kl_coefficients = kl_coefficients / alpha  # divide by spatial resolution (alpha)
+        kl_coefficients = kl_coefficients / torch.sum(kl_coefficients, dim=1, keepdim=True)  # normalize -> sum to 1
+        kl_coefficients = (kl_coefficients * kl_terms.shape[0]).squeeze(0).detach()  # sum to num_groups
+        total_kl = torch.sum(kl_terms * kl_coefficients, dim=0, keepdim=True)
 
         # for reporting
-        kl_coeffs = kl_coeff_i.squeeze(0)
-    else:
-        kl_all = torch.stack(kl_all, dim=1)
-        kl_vals = torch.mean(kl_all, dim=0)
-        kl = torch.sum(kl_all, dim=1)
-        kl_coeffs = torch.ones(size=(len(kl_vals),))
+        kl_gammas = kl_coefficients
+        kl_terms = kl_terms.detach()
 
-    return kl_coeff * kl, kl_coeffs, kl_vals
+    else:
+
+        # after warmup and validation
+        total_kl = torch.sum(kl_unbalanced_terms, dim=1)            # sum of each component (not balanced)
+        kl_terms = torch.mean(kl_unbalanced_terms, dim=0).detach()  # mean on batch
+        kl_gammas = torch.ones_like(kl_terms)
+
+    return beta * total_kl, kl_gammas, kl_terms
 
 
 def kl_coeff(step, total_step, constant_step, min_kl_coeff):

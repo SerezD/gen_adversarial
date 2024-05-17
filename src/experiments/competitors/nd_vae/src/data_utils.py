@@ -125,10 +125,12 @@ class ImgDataset(Dataset):
 
         self.transforms = Compose([ToTensor(), Resize(image_size, antialias=True)])
 
-        train_files = sorted(list(pathlib.Path(train_folder).rglob('*.jpg')))
+        train_files = sorted(list(pathlib.Path(train_folder).rglob('*.jpg')) +
+                             list(pathlib.Path(train_folder).rglob('*.png')))
         self.train_files = [i.absolute().as_posix() for i in train_files]
 
-        adv_files = sorted(list(pathlib.Path(adv_folder).rglob('*.jpg')))
+        adv_files = sorted(list(pathlib.Path(adv_folder).rglob('*.jpg')) +
+                           list(pathlib.Path(adv_folder).rglob('*.png')))
         self.adv_files = [i.absolute().as_posix() for i in adv_files]
 
         labels_as_str = [str(i).split('/')[-2] for i in train_files]
