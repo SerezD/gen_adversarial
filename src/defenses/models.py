@@ -15,52 +15,6 @@ Contains all the models for defense, including BaseClassificationModels and HLDe
 """
 
 
-class Cifar10VGGModel(BaseClassificationModel, torch.nn.Module):
-
-    def __init__(self, model_path: str, device: str):
-        """
-        Wrapper for the Cifar10 Vgg-16 model downloaded from torch hub.
-        """
-
-        mean = (0.5070, 0.4865, 0.4409)
-        std = (0.2673, 0.2564, 0.2761)
-        super().__init__(model_path, device, mean, std)
-
-    def load_classifier(self, model_path: str, device: str) -> nn.Module:
-        """
-        custom method to load the pretrained classifier.
-        :param model_path: absolute path to the pretrained model.
-        :param device: cuda device (or cpu) to load the model on
-        :return: nn.Module of the pretrained classifier
-        """
-        cnn = torch.hub.load(model_path, "cifar10_vgg16_bn", source='local', pretrained=True)
-        cnn = cnn.to(device).eval()
-        return cnn
-
-
-class Cifar10ResnetModel(BaseClassificationModel, torch.nn.Module):
-
-    def __init__(self, model_path: str, device: str):
-        """
-        Wrapper for the Cifar10 Resnet-32 model downloaded from torch hub.
-        """
-
-        mean = (0.5070, 0.4865, 0.4409)
-        std = (0.2673, 0.2564, 0.2761)
-        super().__init__(model_path, device, mean, std)
-
-    def load_classifier(self, model_path: str, device: str) -> nn.Module:
-        """
-        custom method to load the pretrained classifier.
-        :param model_path: absolute path to the pretrained model.
-        :param device: cuda device (or cpu) to load the model on
-        :return: nn.Module of the pretrained classifier
-        """
-        cnn = torch.hub.load(model_path, "cifar10_resnet32", source='local', pretrained=True)
-        cnn = cnn.to(device).eval()
-        return cnn
-
-
 class CelebAResnetModel(BaseClassificationModel, torch.nn.Module):
 
     def __init__(self, model_path: str, device: str):
@@ -86,24 +40,21 @@ class CelebAResnetModel(BaseClassificationModel, torch.nn.Module):
         return resnet
 
 
-class Cifar10NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
+class NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
-    def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str, interpolation_alphas: tuple,
-                 initial_noise_eps: float = 0.0, device: str = 'cpu', temperature: float = 0.6):
+    def __init__(self, classifier, autoencoder_path: str,  # TODO classifier
+                 interpolation_alphas: tuple, initial_noise_eps: float = 0.0,
+                 apply_gaussian_blur: bool = False, device: str = 'cpu', temperature: float = 0.6):
         """
-        Defense model using an NVAE pretrained on Cifar10.
-
+        Defense model using an NVAE.
         :param temperature: temperature for sampling.
         """
-
-        # classifier must be one of the two CNNs pre-trained on Cifar-10
-        assert isinstance(classifier, Cifar10VGGModel) or isinstance(classifier, Cifar10ResnetModel), \
-            "invalid classifier passed to Cifar10NVAEDefenseModel"
 
         self.temperature = temperature
 
         # no need for preprocessing, since it is done directly in NVAE forward pass.
-        super().__init__(classifier, autoencoder_path, interpolation_alphas, initial_noise_eps, device)
+        super().__init__(classifier, autoencoder_path, interpolation_alphas, initial_noise_eps,
+                         apply_gaussian_blur, device)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
@@ -244,7 +195,7 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: CelebAResnetModel, autoencoder_path: str,
                  interpolation_alphas: tuple,
-                 initial_noise_eps: float = 0.0,
+                 initial_noise_eps: float = 0.0, apply_gaussian_blur: bool = False,
                  device: str = 'cpu'):
         """
         Defense model using an StyleGan pretrained on FFHQ.
@@ -253,7 +204,8 @@ class CelebAStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         mean = (0.5, 0.5, 0.5)
         std = (0.5, 0.5, 0.5)
 
-        super().__init__(classifier, autoencoder_path, interpolation_alphas, initial_noise_eps, device, mean, std)
+        super().__init__(classifier, autoencoder_path, interpolation_alphas, initial_noise_eps, apply_gaussian_blur,
+                         device, mean, std)
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """

@@ -268,7 +268,7 @@ if __name__ == '__main__':
     #   KERNEL_SIZE for DOWNSAMPLING
     #   CELEB-A 256 // 8 -> 32
     #   CIFAR-10  32 // 2 -> 16
-    KERNEL_SIZE = 2 if args.init_size == 32 else 8
+    KERNEL_SIZE = 1 if args.init_size == 32 else 8
     code_size = 512
     n_critic = 1
 

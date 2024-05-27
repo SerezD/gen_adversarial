@@ -2,10 +2,14 @@ import argparse
 import json
 
 import foolbox as fb
+import torch.multiprocessing as mp
 import os
 import torch
 from torch import nn
+from torch._C._distributed_c10d import ReduceOp
 from torch.utils.data import DataLoader
+from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Normalize
 from tqdm import tqdm
 
@@ -13,8 +17,6 @@ from data.datasets import ImageLabelDataset
 from src.defenses.common_utils import load_ResNet_CelebA, load_hub_CNN
 from src.experiments.competitors.nd_vae.src.models.NVAE import Defence_NVAE
 from src.experiments.competitors.nd_vae.src.models.NVAE_utils import DiscMixLogistic
-
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
 class DefenseModel(nn.Module):
@@ -40,6 +42,15 @@ class DefenseModel(nn.Module):
 
         preds = self.base_classifier(x_cln)
         return preds
+
+
+def ddp_setup(rank: int, world_size: int):
+
+   os.environ["MASTER_ADDR"] = "localhost"
+   os.environ["MASTER_PORT"] = "12355"
+
+   torch.cuda.set_device(rank)
+   init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 def parse_args():
@@ -73,7 +84,11 @@ def parse_args():
     return args
 
 
-def main(args):
+def main(rank, world_size, args):
+
+    ddp_setup(rank, world_size)
+
+    device = f'cuda:{rank}'
 
     # load pre-trained models
     if args.classifier_type == 'resnet-32':
@@ -91,6 +106,10 @@ def main(args):
     elif args.classifier_type == 'resnet-50':
         base_classifier = load_ResNet_CelebA(args.classifier_path, device)
 
+        args.image_size = 256
+        bounds_l2 = (0.5, 1.0, 2.0, 4.0)  # TODO CHECK BOUNDS
+        classifier_preprocessing = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
         NVAE_PARAMS = {
             'x_channels': 3,
             'pre_proc_groups': 2,
@@ -105,16 +124,13 @@ def main(args):
                          NVAE_PARAMS['pre_proc_groups'],
                          NVAE_PARAMS['scales'],
                          NVAE_PARAMS['groups'],
-                         NVAE_PARAMS['cells'])
+                         NVAE_PARAMS['cells'],
+                         args.image_size)
 
         state_dict = torch.load(args.autoencoder_path)
         nd_vae.load_state_dict(state_dict)
         nd_vae.to(device).eval()
 
-        classifier_preprocessing = Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-
-        args.image_size = 256
-        bounds_l2 = (0.5, 1.0, 2.0, 4.0)  # TODO CHECK BOUNDS
     else:
         raise ValueError(f'Unknown classifier type: {args.classifier_type}')
 
@@ -126,27 +142,26 @@ def main(args):
     fb_defense_model = fb.models.ExpectationOverTransformationWrapper(fb_defense_model, n_steps=8)
 
     # dataloader
-    dataloader = DataLoader(ImageLabelDataset(folder=args.images_path, image_size=args.image_size),
-                            batch_size=args.batch_size, shuffle=False)
+    dataset = ImageLabelDataset(folder=args.images_path, image_size=args.image_size)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, sampler=DistributedSampler(dataset))
+    dataloader.sampler.set_epoch(0)
 
     # attacks
     n_steps = 15  # reduce number of tests
     attacks = [
-        fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=96),
-        fb.attacks.L2DeepFoolAttack(steps=50,  candidates=10, overshoot=0.02),
-        fb.attacks.L2CarliniWagnerAttack(binary_search_steps=2, steps=2048)
-
-        # fb.attacks.L2ClippingAwareRepeatedAdditiveGaussianNoiseAttack(repeats=4),
-        # fb.attacks.L2DeepFoolAttack(steps=50, candidates=10, overshoot=0.02),
-        # fb.attacks.L2CarliniWagnerAttack(binary_search_steps=1, steps=4)
-
+        fb.attacks.L2DeepFoolAttack(steps=50, candidates=10, overshoot=0.02),
+        # TODO TEST
+        fb.attacks.L2CarliniWagnerAttack(binary_search_steps=2,
+                                         steps=2048,
+                                         confidence=2e-2,
+                                         initial_const=16.0)
     ]
 
     success_rates = torch.empty((3, len(bounds_l2), 0), device=device)
 
     for idx, (images, labels) in enumerate(tqdm(dataloader)):
 
-        # if idx > 20:
+        # if idx > 14:
         #     break
 
         if idx % n_steps != 0:
@@ -155,6 +170,7 @@ def main(args):
         images = torch.clip(images.to(device), 0.0, 1.0)
         labels = labels.to(device)
 
+        # uncomment to visualize some examples
         # from torchvision.utils import make_grid
         # from matplotlib import pyplot as plt
         # images += torch.randn_like(images) * 0.1
@@ -165,28 +181,39 @@ def main(args):
         # plt.show()
         # continue
 
-        # BRUTE FORCE
+        # CLEAN ACCURACY
         with torch.no_grad():
-            success_0 = attacks[0](fb_defense_model, images, labels, epsilons=bounds_l2)[2]
+            # Note: success rate is true if prediction is NOT EQUAL to label!
+            success_0 = torch.ne(fb_defense_model(images).argmax(dim=1), labels)
+            success_0 = success_0.unsqueeze(0).repeat(len(bounds_l2), 1)
 
         # DEEP FOOL
-        success_1 = attacks[1](fb_defense_model, images, labels, epsilons=bounds_l2)[2]
+        success_1 = attacks[0](fb_defense_model, images, labels, epsilons=bounds_l2)[2]
 
         # C&W
-        success_2 = attacks[2](fb_defense_model, images, labels, epsilons=bounds_l2)[2]
+        success_2 = attacks[1](fb_defense_model, images, labels, epsilons=bounds_l2)[2]
 
         success_rates = torch.cat((success_rates,
-                                    torch.stack((success_0, success_1, success_2), dim=0)), dim=2)
+                                   torch.stack((success_0, success_1, success_2), dim=0)), dim=2)
 
-    res_dict = {}
-    for a_i, attack in enumerate(['BruteForce', 'DeepFool', 'C&W']):
-        for b_i, bound in enumerate(bounds_l2):
-            res_dict[f'{attack}_{bound:.2f}'] = success_rates[a_i][b_i].mean().item()
+    # Merge results of different ranks
+    success_rates = success_rates.mean(dim=-1)  # n_attacks, n_bounds
+    torch.distributed.all_reduce(success_rates, ReduceOp.SUM)
+    success_rates = success_rates / world_size
 
-    with open(f'{args.results_folder}results.json', 'w') as f:
-        json.dump(res_dict, f)
+    if rank == 0:
+        res_dict = {}
+        for a_i, attack in enumerate(['Clean', 'DeepFool', 'C&W']):
+            for b_i, bound in enumerate(bounds_l2):
+                res_dict[f'{attack}_{bound:.2f}'] = success_rates[a_i][b_i].item()
+
+        with open(f'{args.results_folder}results.json', 'w') as f:
+            json.dump(res_dict, f)
+
+    destroy_process_group()
 
 
 if __name__ == '__main__':
 
-    main(parse_args())
+    world_size = torch.cuda.device_count()
+    mp.spawn(main, args=(world_size, parse_args()), nprocs=world_size)

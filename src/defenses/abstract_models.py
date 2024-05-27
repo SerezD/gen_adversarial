@@ -1,5 +1,7 @@
+import math
 from abc import ABC, abstractmethod
 from kornia.enhance import normalize, denormalize
+from kornia.filters import gaussian_blur2d
 import torch
 from torch import nn
 
@@ -64,7 +66,8 @@ class HLDefenseModel(ABC):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str,
                  interpolation_alphas: tuple, initial_noise_eps: float = 0.0,
-                 device: str = 'cpu', mean: tuple = None, std: tuple = None):
+                 apply_gaussian_blur: bool = False, device: str = 'cpu',
+                 mean: tuple = None, std: tuple = None):
         """
         Model composed of HL-Autoencoder + CNN.
         The autoencoder is used to pre-process the input samples.
@@ -74,6 +77,7 @@ class HLDefenseModel(ABC):
         :param interpolation_alphas: express, for each hierarchy, the degree of interpolation between
         reconstruction code (alpha=0) and new sampled code (alpha=1).
         :param initial_noise_eps: l2 bound for optional noise randomly added to images before purification.
+        :param apply_gaussian_blur: optional blurring of input images.
         :param device: cuda device (or cpu) to load both ae and classifier on
         :param mean: optional param for Normalization and Denormalization operations.
         :param std: optional param for Normalization and Denormalization operations.
@@ -82,6 +86,7 @@ class HLDefenseModel(ABC):
         super().__init__()
 
         self.eps = initial_noise_eps
+        self.blur_input = apply_gaussian_blur
 
         self.device = device
 
@@ -134,6 +139,23 @@ class HLDefenseModel(ABC):
 
         return x_noisy
 
+    def apply_gaussian_blur(self, x: torch.Tensor):
+
+        if not self.blur_input:
+            return x
+
+        b, c, h, w = x.shape
+
+        # resolution = 2^n
+        n = math.sqrt(h)
+
+        # kernel_size = 2^(n // 2) - 1
+        k = int(2**(n//2) - 1)
+
+        blurred_x = gaussian_blur2d(x, kernel_size=k, sigma=(1., 1.))
+        return blurred_x
+
+
     def __call__(self, batch: torch.Tensor, preds_only: bool = True) -> list:
         """
         :param batch: image tensor of shape (B C H W)
@@ -143,6 +165,9 @@ class HLDefenseModel(ABC):
                 1. un-normalized predictions of shape (B, N_CLASSES), computed on the purified images.
                 2. the batch of purified images (B, C, H, W)
         """
+
+        # optional preprocessing
+        batch = self.apply_gaussian_blur(batch)
         batch = self.add_gaussian_noise(batch)
 
         # preprocessing before autoencoding

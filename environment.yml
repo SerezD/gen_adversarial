@@ -2,29 +2,23 @@ name: gen_adversarial
 channels:
   - pytorch
   - nvidia
+  - gpytorch
   - conda-forge
 dependencies:
   - pytorch
   - torchvision
   - torchaudio
   - pytorch-cuda==12.1
-  - cudatoolkit-dev
+  # StyleGan dependencies for custom cuda ops
+  - nvidia/label/cuda-12.1.0::cuda-toolkit
   - ninja
-  - torchmetrics
+  # other stuff
   - einops
   - kornia
   - matplotlib
-  - cupy
-  - pkg-config
-  - libjpeg-turbo>=2.1.4
-  - opencv
-  - numba==0.56.2  # solves import error!
+  - botorch  # bayesian optimization
   - pip
   - pip:
-      - ffcv
       - tqdm
-      - scheduling_utils
       - pytorch-model-summary
-      - wandb
-      - torch-fidelity
       - foolbox  # adversarial attacks

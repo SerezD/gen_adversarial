@@ -28,8 +28,9 @@ def kl_balancer(kl_unbalanced_terms: list, beta: float = 1.0, balance: bool = Fa
 
     if balance and beta < 1.0:
 
-        # done only during training warmup phase
         kl_unbalanced_terms = torch.stack(kl_unbalanced_terms, dim=0)
+
+        # done only during training warmup phase
         device = kl_unbalanced_terms.device
         alpha = alpha.to(device)  # terms depending on groups
 
@@ -51,6 +52,7 @@ def kl_balancer(kl_unbalanced_terms: list, beta: float = 1.0, balance: bool = Fa
     else:
 
         # after warmup and validation
+        kl_unbalanced_terms = torch.stack(kl_unbalanced_terms, dim=1)
         total_kl = torch.sum(kl_unbalanced_terms, dim=1)            # sum of each component (not balanced)
         kl_terms = torch.mean(kl_unbalanced_terms, dim=0).detach()  # mean on batch
         kl_gammas = torch.ones_like(kl_terms)
