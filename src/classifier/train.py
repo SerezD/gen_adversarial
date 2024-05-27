@@ -11,23 +11,27 @@ from kornia.enhance import Normalize
 from torch.backends import cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from pytorch_model_summary import summary
 from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip
 from tqdm import tqdm
 
-from data.loading_utils import ffcv_labels_loader
-from src.classifier.model import ResNet
+from data.datasets import ImageLabelDataset
+from src.classifier.model import ResNet, Vgg
 
 
 def parse_args():
 
-    parser = argparse.ArgumentParser('Resnet50 training on Celeba Identities - 307 classes')
+    parser = argparse.ArgumentParser('Classifiers training')
 
     parser.add_argument('--run_name', type=str, default='test')
     parser.add_argument('--data_path', type=str, required=True,
-                        help='directory of ffcv datasets (.beton files)')
+                        help='directory with train, validation subdirectories')
+    parser.add_argument('--model_type', type=str, choices=['resnet', 'vgg'])
+    parser.add_argument('--n_classes', type=int, default=2)
 
     parser.add_argument('--cumulative_bs', type=int, default=8)
+    parser.add_argument('--image_size', type=int, default=256)
     parser.add_argument('--seed', type=int, default=0)
 
     parser.add_argument('--checkpoint_base_path', type=str, default='./runs/',
@@ -44,9 +48,9 @@ def parse_args():
     if WORLD_RANK == 0:
 
         # check data dir exists
-        if (not os.path.exists(f'{args.data_path}/train.beton') or
-                not os.path.exists(f'{args.data_path}/validation.beton')):
-            raise FileNotFoundError(f'{args.data_path}/train.beton or {args.data_path}/validation.beton does not exist')
+        if (not os.path.exists(f'{args.data_path}/train') or
+                not os.path.exists(f'{args.data_path}/validation')):
+            raise FileNotFoundError(f'{args.data_path}/train or {args.data_path}/validation does not exist')
 
         # check checkpoint file exists
         if args.resume_from is not None and not os.path.exists(f'{args.resume_from}'):
@@ -57,6 +61,7 @@ def parse_args():
             os.makedirs(f'{args.checkpoint_base_path}/{args.run_name}')
 
     return args
+
 
 def setup(rank: int, world_size: int, seed: int):
 
@@ -88,14 +93,21 @@ def cleanup():
 
 def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
 
-    image_size = 256
+    image_size = args.image_size
     batch_size = args.cumulative_bs // world_size
-    seed = args.seed
     is_distributed = world_size > 1
 
-    train_dataloader = ffcv_labels_loader(args.data_path, batch_size, image_size, seed, rank, is_distributed)
-    val_dataloader = ffcv_labels_loader(args.data_path, batch_size, image_size, seed, rank, is_distributed,
-                                        mode='validation')
+    t_dataset = ImageLabelDataset(f'{args.data_path}/train', image_size)
+    v_dataset = ImageLabelDataset(f'{args.data_path}/validation', image_size)
+
+    if is_distributed:
+        train_dataloader = DataLoader(t_dataset, batch_size=batch_size, shuffle=False,
+                                      sampler=DistributedSampler(t_dataset))
+        val_dataloader = DataLoader(v_dataset, batch_size=batch_size, shuffle=False,
+                                    sampler=DistributedSampler(v_dataset))
+    else:
+        train_dataloader = DataLoader(t_dataset, batch_size=batch_size, shuffle=True)
+        val_dataloader = DataLoader(v_dataset, batch_size=batch_size, shuffle=False)
 
     train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
                                                  Normalize(mean=0.5, std=0.5),
@@ -125,13 +137,13 @@ def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
 
     for step, x in enumerate(tqdm(dataloader)):
 
-        x, y = augmentations(x[0]), x[1]
+        x, y = augmentations(x[0].to(LOCAL_RANK)), x[1].to(LOCAL_RANK)
 
         optimizer.zero_grad()
 
         # forward pass
         logits = model(x)
-        loss = torch.nn.functional.cross_entropy(logits, y.squeeze(1))
+        loss = torch.nn.functional.cross_entropy(logits, y)
 
         loss.backward()
         optimizer.step()
@@ -162,13 +174,13 @@ def epoch_validation(dataloader: DataLoader, model: ResNet, augmentations, args,
 
     for step, batch in enumerate(tqdm(dataloader)):
 
-        x, y = augmentations(batch[0]), batch[1]
+        x, y = augmentations(batch[0].to(LOCAL_RANK)), batch[1].to(LOCAL_RANK)
 
         logits = model(x)
         preds = torch.argmax(logits, dim=1, keepdim=True)
 
         all_preds = torch.cat((all_preds, preds))
-        all_targets = torch.cat((all_targets, y))
+        all_targets = torch.cat((all_targets, y.unsqueeze(1)))
 
     # compute accuracy
     n = all_preds.shape[0]
@@ -193,7 +205,10 @@ def main(args: argparse.Namespace):
     train_loader, val_loader, train_augmentations, val_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
 
     # create model and move it to GPU with id rank
-    model = ResNet().to(LOCAL_RANK)
+    if args.model_type == 'resnet':
+        model = ResNet(n_classes=args.n_classes).to(LOCAL_RANK)
+    else:
+        model = Vgg(n_classes=args.n_classes).to(LOCAL_RANK)
 
     # load checkpoint if resume
     if args.resume_from is not None:
@@ -243,6 +258,10 @@ def main(args: argparse.Namespace):
 
         # Training
         ddp_model.train()
+
+        if WORLD_SIZE > 1:
+            train_loader.sampler.set_epoch(epoch)
+
         global_step = epoch_train(train_loader, train_augmentations, ddp_model.module, optimizer, args, global_step)
 
         # Validation

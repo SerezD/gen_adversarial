@@ -1,16 +1,15 @@
 import torch.nn as nn
 from torch import Tensor
 
-from torchvision.models import resnet50
+from torchvision.models import resnet50, vgg16
 from torchvision.models.resnet import ResNet50_Weights
+from torchvision.models.vgg import VGG16_Weights
 
 
 class ResNet(nn.Module):
-    def __init__(self, get_weights: bool = True) -> None:
+    def __init__(self, n_classes: int, get_weights: bool = True) -> None:
 
         super().__init__()
-
-        num_classes = 2  # gender classification
 
         weights = ResNet50_Weights.DEFAULT if get_weights else None
         self.model = resnet50(weights=weights)
@@ -21,7 +20,23 @@ class ResNet(nn.Module):
                             nn.Linear(prev_dim, prev_dim, bias=False), # first layer
                             nn.BatchNorm1d(prev_dim),
                             nn.ReLU(inplace=True),
-                            nn.Linear(prev_dim, num_classes))  # output layer
+                            nn.Linear(prev_dim, n_classes))  # output layer
+
+    def forward(self, x: Tensor) -> Tensor:
+
+        return self.model(x)
+
+
+class Vgg(nn.Module):
+    def __init__(self, n_classes: int) -> None:
+
+        super().__init__()
+
+        self.model = vgg16()
+
+        # build a 3-layer projector
+        prev_dim = self.model.classifier[-1].weight.shape[1]
+        self.model.classifier[-1] = nn.Linear(prev_dim, n_classes)  # output layer
 
     def forward(self, x: Tensor) -> Tensor:
 
