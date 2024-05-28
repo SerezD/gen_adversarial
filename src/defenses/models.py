@@ -34,7 +34,7 @@ class CelebAResnetModel(BaseClassificationModel, torch.nn.Module):
         :return: nn.Module of the pretrained classifier
         """
         ckpt = torch.load(model_path, map_location='cpu')
-        resnet = ResNet(get_weights=False)
+        resnet = ResNet(n_classes=2, get_weights=False)
         resnet.load_state_dict(ckpt['state_dict'])
         resnet.to(device).eval()
         return resnet

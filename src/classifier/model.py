@@ -28,15 +28,16 @@ class ResNet(nn.Module):
 
 
 class Vgg(nn.Module):
-    def __init__(self, n_classes: int) -> None:
+    def __init__(self, n_classes: int, get_weights: bool = True) -> None:
 
         super().__init__()
 
-        self.model = vgg16()
+        weights = VGG16_Weights.DEFAULT if get_weights else None
+        self.model = vgg16(weights=weights)
 
         # build a 3-layer projector
-        prev_dim = self.model.classifier[-1].weight.shape[1]
-        self.model.classifier[-1] = nn.Linear(prev_dim, n_classes)  # output layer
+        prev_dim = self.model.classifier[0].weight.shape[1]
+        self.model.classifier = nn.Linear(prev_dim, n_classes)  # output layer
 
     def forward(self, x: Tensor) -> Tensor:
 

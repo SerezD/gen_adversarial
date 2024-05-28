@@ -125,8 +125,8 @@ def main(rank, world_size, args):
     for idx, (images, labels) in enumerate(tqdm(dataloader)):
 
         # TODO
-        if idx > 14:
-            break
+        # if idx > 14:
+        #     break
 
         if idx % n_steps != 0:
             continue

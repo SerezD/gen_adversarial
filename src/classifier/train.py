@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from pytorch_model_summary import summary
-from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip
+from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop, RandomGrayscale
 from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
@@ -110,6 +110,9 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
         val_dataloader = DataLoader(v_dataset, batch_size=batch_size, shuffle=False)
 
     train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
+                                                 RandomResizedCrop(size=(image_size, image_size),
+                                                                   scale=(0.85, 1.0)),
+                                                 RandomGrayscale(p=0.2),
                                                  Normalize(mean=0.5, std=0.5),
                                                  same_on_batch=False)
     val_augmentations = Normalize(mean=0.5, std=0.5)
@@ -247,7 +250,7 @@ def main(args: argparse.Namespace):
     # ddp model, optimizer, scheduler, scaler
     ddp_model = DDP(model, device_ids=[LOCAL_RANK])
 
-    optimizer = torch.optim.AdamW(ddp_model.parameters(), learning_rate)
+    optimizer = torch.optim.SGD(ddp_model.parameters(), learning_rate, momentum=0.9)
 
     for epoch in range(init_epoch, args.epochs):
 
