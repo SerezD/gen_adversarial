@@ -235,7 +235,9 @@ def main(args: argparse.Namespace):
         global_step, init_epoch = 0, 0
 
         if WORLD_RANK == 0:
-            line = summary(model, torch.zeros((1, 3, 256, 256), device=f'cuda:{LOCAL_RANK}'), show_input=False)
+            line = summary(model,
+                           torch.zeros((1, 3, args.image_size, args.image_size), device=f'cuda:{LOCAL_RANK}'),
+                           show_input=False)
             print(line)
             args.log.append(line)
 
@@ -283,7 +285,7 @@ def main(args: argparse.Namespace):
                 epoch_validation(val_loader, ddp_model.module, val_augmentations, args, global_step)
 
             # Save checkpoint (after validation)
-            if WORLD_RANK == 0:
+            if WORLD_RANK == 0 and epoch % (eval_freq * 2) == 0:
                 line = '[INFO] Saving Checkpoint\n'
                 print(line)
                 args.log.append(line)
