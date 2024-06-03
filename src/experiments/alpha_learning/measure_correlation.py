@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-def main():
+
+def main(folder: str):
     """
     Given a set of alpha values and their accuracy.
     1. Compute Spearman's correlation coefficient for each alpha list, to measure monotonicity
@@ -12,7 +13,7 @@ def main():
     3. Measure the linear correlation between the two
     """
 
-    alphas = np.load('./results/E4E_StyleGAN_resnet-50/alphas.npy')
+    alphas = np.load(f'{folder}/alphas.npy')
     alphas = torch.tensor(alphas, device=device)
 
     b, n = alphas.shape
@@ -25,7 +26,7 @@ def main():
     d_squared = torch.pow(rank_x - rank_y, 2)
 
     rho = (1 - (6 * d_squared.sum(dim=1)) / (n * (n**2 - 1))).cpu().numpy()
-    accuracies = np.load('./results/E4E_StyleGAN_resnet-50/accuracies.npy')[:, 0]
+    accuracies = np.load(f'{folder}/accuracies.npy')[:, 0]
 
     # compute Pearson linear correlation
     # Compute the covariance of x and y
@@ -46,6 +47,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
+
 if __name__ == '__main__':
 
-    main()
+    main(folder='/media/dserez/runs/adversarial/alpha_learning/E4E_StyleGAN_resnet-50/grid_search/')
