@@ -1,0 +1,3 @@
+classifier_path: /media/dserez/runs/adversarial/CNNs/resnet50_celeba_hq_gender/best.pt
+# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/resnet50_celeba_hq_gender/best.pt
+type: noise

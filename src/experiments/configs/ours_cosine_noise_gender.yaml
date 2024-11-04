@@ -1,0 +1,26 @@
+classifier_path: /media/dserez/runs/adversarial/CNNs/resnet50_celeba_hq_gender/best.pt
+autoencoder_path: /media/dserez/runs/stylegan2/inversions/e4e_ffhq_encoder.pt
+# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/resnet50_celeba_hq_gender/best.pt
+# autoencoder_path: /home/dserez/gen_adversarial/runs/e4e_ffhq_encoder.pt
+interpolation_alphas:
+  - 0.008
+  - 0.030
+  - 0.067
+  - 0.117
+  - 0.179
+  - 0.250
+  - 0.329
+  - 0.413
+  - 0.500
+  - 0.587
+  - 0.671
+  - 0.750
+  - 0.821
+  - 0.883
+  - 0.933
+  - 0.970
+  - 0.992
+  - 1.000
+alpha_attenuation: 1.0
+initial_noise_eps: 4.0
+gaussian_blur_input: False

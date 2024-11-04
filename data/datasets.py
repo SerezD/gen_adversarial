@@ -55,7 +55,7 @@ class ImageNameLabelDataset(Dataset):
         x = Image.open(self.samples[idx]).convert('RGB')
         y = self.img_labels[idx]
 
-        return self.transforms(x), self.samples[idx].split('/')[-1], y
+        return self.transforms(x), self.samples[idx].split('/')[-2:], y
 
 
 class ImageLabelDataset(Dataset):
@@ -71,11 +71,6 @@ class ImageLabelDataset(Dataset):
         class_names = sorted(list(set(labels_as_str)))
         self.img_labels = torch.tensor([class_names.index(s) for s in labels_as_str])
 
-        if 'train' in folder:
-            self.transforms = Compose([ToTensor(), RandomHorizontalFlip(),
-                                       Resize((image_size, image_size), antialias=True)])
-        else:
-            self.transforms = Compose([ToTensor(), Resize((image_size, image_size), antialias=True)])
         self.transforms = Compose([ToTensor(), Resize((image_size, image_size), antialias=True)])
 
     def __len__(self):

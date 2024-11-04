@@ -1,0 +1,12 @@
+classifier_path: /media/dserez/runs/adversarial/CNNs/vgg11_celeba_64_identities/best.pt
+autoencoder_path: /media/dserez/runs/adversarial/competitors/nd_vae/celeba64/checkpoint/nd_vae.pth
+# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/vgg11_celeba_64_identities/best.pt
+# autoencoder_path: /home/dserez/gen_adversarial/runs/competitors/nd_vae/celeba64/checkpoint/nd_vae.pth
+
+noise_std: 0.05
+x_channels: 3
+pre_proc_groups: 2
+encoding_channels: 32
+scales: 1
+groups: 8
+cells: 2

@@ -27,7 +27,7 @@ class UpFirDn2dBackward(Function):
 
         grad_input = upfirdn2d_op.upfirdn2d(
             grad_output,
-            grad_kernel,
+            grad_kernel.to(grad_output.dtype),
             down_x,
             down_y,
             up_x,
@@ -113,7 +113,7 @@ class UpFirDn2d(Function):
         ctx.g_pad = (g_pad_x0, g_pad_x1, g_pad_y0, g_pad_y1)
 
         out = upfirdn2d_op.upfirdn2d(
-            input, kernel, up_x, up_y, down_x, down_y, pad_x0, pad_x1, pad_y0, pad_y1
+            input, kernel.to(input.dtype), up_x, up_y, down_x, down_y, pad_x0, pad_x1, pad_y0, pad_y1
         )
         # out = out.view(major, out_h, out_w, minor)
         out = out.view(-1, channel, out_h, out_w)

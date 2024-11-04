@@ -352,7 +352,7 @@ class AutoEncoder(nn.Module):
             In Section 2.1, given Wl the weight matrix of Layer l and al the activation function of layer l, if
             the Lipschitz Norm of al is 1, then the Lipschitz norm ||f||Lp of the function f (e.g. the Encoder), can be
             bounded as:
-                ||f||Lp <= PROD_{l=1}^L \sigma(Wl)   (Equation 7 of the paper).
+                ||f||Lp <= PROD_{l=1}^L sigma(Wl)   (Equation 7 of the paper).
 
             About the Lipschitz Norm:
             https://math.stackexchange.com/questions/2692579/is-lipschitz-norm-the-other-name-for-lipschitz-constant

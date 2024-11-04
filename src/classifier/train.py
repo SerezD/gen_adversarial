@@ -13,11 +13,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from pytorch_model_summary import summary
-from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop, RandomGrayscale
+from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop, RandomGrayscale, \
+    RandomContrast, RandomEqualize, RandomBrightness
 from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
-from src.classifier.model import ResNet, Vgg
+from src.classifier.model import ResNet, Vgg, ResNext
 
 
 def parse_args():
@@ -27,7 +28,7 @@ def parse_args():
     parser.add_argument('--run_name', type=str, default='test')
     parser.add_argument('--data_path', type=str, required=True,
                         help='directory with train, validation subdirectories')
-    parser.add_argument('--model_type', type=str, choices=['resnet', 'vgg'])
+    parser.add_argument('--model_type', type=str, choices=['resnext', 'resnet', 'vgg'])
     parser.add_argument('--n_classes', type=int, default=2)
 
     parser.add_argument('--cumulative_bs', type=int, default=8)
@@ -109,12 +110,22 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
         train_dataloader = DataLoader(t_dataset, batch_size=batch_size, shuffle=True)
         val_dataloader = DataLoader(v_dataset, batch_size=batch_size, shuffle=False)
 
+    # train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
+    #                                              RandomResizedCrop(size=(image_size, image_size),
+    #                                                                scale=(0.85, 1.0)),
+    #                                              RandomGrayscale(p=0.2),
+    #                                              Normalize(mean=0.5, std=0.5),
+    #                                              same_on_batch=False)
     train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
                                                  RandomResizedCrop(size=(image_size, image_size),
-                                                                   scale=(0.85, 1.0)),
-                                                 RandomGrayscale(p=0.2),
+                                                                   scale=(0.75, 1.0)),
+                                                 RandomBrightness(brightness=(0.5, 0.5), p=0.3),
+                                                 RandomContrast(contrast=(0.5, 0.5), p=0.3),
+                                                 RandomEqualize(p=0.3),
+                                                 RandomGrayscale(p=0.1),
                                                  Normalize(mean=0.5, std=0.5),
                                                  same_on_batch=False)
+
     val_augmentations = Normalize(mean=0.5, std=0.5)
 
     if WORLD_RANK == 0:
@@ -208,9 +219,11 @@ def main(args: argparse.Namespace):
     train_loader, val_loader, train_augmentations, val_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
 
     # create model and move it to GPU with id rank
-    if args.model_type == 'resnet':
+    if args.model_type == 'resnext':
+        model = ResNext(n_classes=args.n_classes).to(LOCAL_RANK)
+    elif args.model_type == 'resnet':
         model = ResNet(n_classes=args.n_classes).to(LOCAL_RANK)
-    else:
+    elif args.model_type == 'vgg':
         model = Vgg(n_classes=args.n_classes).to(LOCAL_RANK)
 
     # load checkpoint if resume

@@ -45,7 +45,7 @@ class pSp(nn.Module):
         self.__load_latent_avg(ckpt)
 
     def forward(self, x, resize=True, latent_mask=None, input_code=False, randomize_noise=True,
-                inject_latent=None, return_latents=False, alpha=None):
+                inject_latent=None, return_latents=False, alpha=None, is_cars=False):
 
         if input_code:
             codes = x
@@ -57,6 +57,9 @@ class pSp(nn.Module):
                     codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)[:, 0, :]
                 else:
                     codes = codes + self.latent_avg.repeat(codes.shape[0], 1, 1)
+
+            if codes.shape[1] == 18 and is_cars:
+                codes = codes[:, :16, :]
 
         if latent_mask is not None:
             for i in latent_mask:

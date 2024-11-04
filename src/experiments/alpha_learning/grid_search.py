@@ -3,14 +3,8 @@ import os
 
 import numpy as np
 import torch
-from botorch.models import SingleTaskGP
-from botorch.fit import fit_gpytorch_mll
-from botorch.acquisition import ExpectedImprovement
-from botorch.optim import optimize_acqf
-from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from src.experiments.alpha_learning.common import AlphaEvaluator
-from src.experiments.alpha_learning.utils import get_linear_alphas, get_cosine_alphas
+from src.experiments.alpha_learning.common_utils import AlphaEvaluator
 
 
 def parse_args():
@@ -20,14 +14,12 @@ def parse_args():
     parser.add_argument('--adv_images_path', type=str, required=True,
                         help='Precomputed adversaries to use for evaluation')
 
-    parser.add_argument('--batch_size', type=int, required=True)
-
     parser.add_argument('--n_steps', type=int, required=True)
 
     parser.add_argument('--classifier_path', type=str, required=True,
                         help='path to the pre-trained classifier to be attacked')
 
-    parser.add_argument('--classifier_type', type=str, choices=['resnet-50'],
+    parser.add_argument('--classifier_type', type=str, choices=['resnet-50', 'vgg-11', 'resnext-50'],
                         help='type of classifier')
 
     parser.add_argument('--autoencoder_path', type=str, required=True,
@@ -50,12 +42,13 @@ def parse_args():
     return args
 
 
+@torch.no_grad()
 def main(args):
 
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
     evaluator = AlphaEvaluator(args, device)
-    n_alphas = len(evaluator.defense_model.interpolation_alphas)
+    n_alphas = len(evaluator.defense_model.model.interpolation_alphas)
 
     all_alphas = torch.empty((0, n_alphas), device='cpu')
     all_accuracies = torch.empty((0, 1), device='cpu')
@@ -69,7 +62,7 @@ def main(args):
         alphas = torch.zeros((n_alphas,), device=device).uniform_(0, 1)
 
         # evaluate
-        accuracy = 1 - evaluator.objective_function(alphas)
+        accuracy = evaluator.objective_function(alphas)
 
         # append and continue
         all_alphas = torch.cat((all_alphas, alphas.cpu().unsqueeze(0)), dim=0)

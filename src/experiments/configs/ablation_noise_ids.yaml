@@ -1,0 +1,3 @@
+classifier_path: /media/dserez/runs/adversarial/CNNs/vgg11_celeba_64_identities/best.pt
+# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/vgg11_celeba_64_identities/best.pt
+type: noise

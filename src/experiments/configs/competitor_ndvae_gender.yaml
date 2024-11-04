@@ -1,0 +1,12 @@
+classifier_path: /media/dserez/runs/adversarial/CNNs/resnet50_celeba_hq_gender/best.pt
+autoencoder_path: /media/dserez/runs/adversarial/competitors/nd_vae/celeba256/checkpoint/celeba_vae.pth
+# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/resnet50_celeba_hq_gender/best.pt
+# autoencoder_path: /home/dserez/gen_adversarial/runs/competitors/nd_vae/celeba256/checkpoint/celeba_vae.pth
+
+noise_std: 0.1
+x_channels: 3
+pre_proc_groups: 2
+encoding_channels: 16
+scales: 2
+groups: 4
+cells: 2

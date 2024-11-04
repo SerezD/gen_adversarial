@@ -2,14 +2,16 @@ import argparse
 
 import numpy as np
 from PIL import Image
-import foolbox as fb
 import os
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.datasets import ImageNameLabelDataset
-from src.defenses.models import CelebAResnetModel, CelebAStyleGanDefenseModel
+from src.attacks.untargeted import FGSM
+from src.defenses.ours.models import CelebaGenderClassifier, E4EStyleGanDefenseModel, CelebaIdentityClassifier, \
+    NVAEDefenseModel, CarsTypeClassifier, TransStyleGanDefenseModel
+from src.defenses.wrappers import EoTWrapper
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
@@ -21,9 +23,10 @@ def parse_args():
     parser = argparse.ArgumentParser('')
 
     parser.add_argument('--images_folder', type=str, required=True,
-                        help='Folder with train/validation images')
+                        help='Folder with images to make adversarial')
 
-    parser.add_argument('--batch_size', type=int, required=True)
+    parser.add_argument('--n_samples', type=int, required=True,
+                        help='You likely want to run BO on a subset of the whole training dataset.')
 
     parser.add_argument('--results_folder', type=str, required=True,
                         help='folder to save image adversaries')
@@ -34,7 +37,7 @@ def parse_args():
     parser.add_argument('--autoencoder_path', type=str, required=True,
                         help='path to the pre-trained HL Autoencoder')
 
-    parser.add_argument('--classifier_type', type=str, choices=['resnet-50', 'vgg-16'],
+    parser.add_argument('--classifier_type', type=str, choices=['resnet-50', 'vgg-11', 'resnext-50'],
                         help='type of classifier')
 
     args = parser.parse_args()
@@ -44,68 +47,72 @@ def parse_args():
 
 def main(args: argparse.Namespace):
 
-    # load pretrained purification model
+    # load and initiate stuff
     if args.classifier_type == 'resnet-50':
         args.image_size = 256
-        args.bound = (4., )
-        args.interpolation_alphas = [0. for _ in range(18)]  # reconstruction only
-        args.initial_noise_eps = 0.
-        args.gaussian_blur_input = False
-        base_classifier = CelebAResnetModel(args.classifier_path, device)
-        defense_model = CelebAStyleGanDefenseModel(base_classifier, args.autoencoder_path,
-                                                   args.interpolation_alphas, args.initial_noise_eps,
-                                                   args.gaussian_blur_input, device)
+
+        base_classifier = CelebaGenderClassifier(args.classifier_path, device)
+
+        interpolation_alphas = [0. for _ in range(18)]  # reconstruction only
+        defense_model = E4EStyleGanDefenseModel(base_classifier, args.autoencoder_path,
+                                                interpolation_alphas, device=device).eval()
+        attack = FGSM(l2_bound=4.)
+
+    elif args.classifier_type == 'vgg-11':
+        args.image_size = 64
+
+        base_classifier = CelebaIdentityClassifier(args.classifier_path, device)
+
+        interpolation_alphas = [0. for _ in range(24)]  # reconstruction only
+        defense_model = NVAEDefenseModel(base_classifier, args.autoencoder_path,
+                                         interpolation_alphas, device=device).eval()
+
+        attack = FGSM(l2_bound=2.)
+
+    elif args.classifier_type == 'resnext-50':
+        args.image_size = 128
+
+        base_classifier = CarsTypeClassifier(args.classifier_path, device)
+
+        interpolation_alphas = [0. for _ in range(16)]  # reconstruction only
+        defense_model = TransStyleGanDefenseModel(base_classifier, args.autoencoder_path,
+                                                  interpolation_alphas, device=device).eval()
+
+        attack = FGSM(l2_bound=4.)
 
     else:
         raise NotImplemented
 
+    # Probably not needed, since we are doing reconstruction only.
+    # However, some non-deterministic stuff may be part of the standard forward pass of generator.
+    defense_model = EoTWrapper(defense_model, eot_steps=32).eval()
+
     # dataloaders
-    train_dataloader = DataLoader(ImageNameLabelDataset(folder=f'{args.images_folder}/train/',
-                                                        image_size=args.image_size),
-                                  batch_size=args.batch_size, shuffle=False)
+    train_dataloader = DataLoader(ImageNameLabelDataset(folder=args.images_folder, image_size=args.image_size),
+                                  batch_size=1, shuffle=True)  # -> shuffle to allow samples from all classes
 
-    valid_dataloader = DataLoader(ImageNameLabelDataset(folder=f'{args.images_folder}/validation/',
-                                                        image_size=args.image_size),
-                                  batch_size=args.batch_size, shuffle=False)
+    found_samples = 0
+    for (image, name, label) in tqdm(train_dataloader):
 
-    # attack info
-    attacked_model = fb.PyTorchModel(defense_model, bounds=(0, 1), device=device)
+        if found_samples == args.n_samples:
+            break
 
-    attack = fb.attacks.L2FastGradientAttack()
+        image, label = torch.clamp(image.to(device), 0., 1.), label.to(device)
 
-    for b_idx, (images, names, labels) in enumerate(tqdm(train_dataloader)):
+        # adversaries
+        success, bound, adversary = attack(image, label, defense_model)
 
-        images, labels = torch.clamp(images.to(device), 0., 1.), labels.to(device)
+        if success and bound > 0.:
 
-        # attacked_batch
-        _, adversaries, _ = attack(attacked_model, images, labels, epsilons=args.bound)
+            found_samples += 1
 
-        # save
-        for i, img in enumerate(adversaries[0]):
-
-            folder_name = f'{args.results_folder}/train/{labels[i].item()}/'
+            # save
+            folder_name = f'{args.results_folder}/{name[0][0]}/'
             if not os.path.exists(folder_name):
                 os.makedirs(folder_name)
 
-            file_name = f'{folder_name}/{names[i]}'
-            Image.fromarray((img * 255).permute(1, 2, 0).cpu().numpy().astype(np.uint8)).save(file_name)
-
-    for b_idx, (images, names, labels) in enumerate(tqdm(valid_dataloader)):
-
-        images, labels = torch.clamp(images.to(device), 0., 1.), labels.to(device)
-
-        # attacked_batch
-        _, adversaries, _ = attack(attacked_model, images, labels, epsilons=args.bound)
-
-        # save
-        for i, img in enumerate(adversaries[0]):
-
-            folder_name = f'{args.results_folder}/validation/{labels[i].item()}/'
-            if not os.path.exists(folder_name):
-                os.makedirs(folder_name)
-
-            file_name = f'{folder_name}/{names[i]}'
-            Image.fromarray((img * 255).permute(1, 2, 0).cpu().numpy().astype(np.uint8)).save(file_name)
+            file_name = f'{folder_name}/{name[1][0]}'
+            Image.fromarray((adversary[0] * 255).permute(1, 2, 0).cpu().numpy().astype(np.uint8)).save(file_name)
 
 
 if __name__ == '__main__':
