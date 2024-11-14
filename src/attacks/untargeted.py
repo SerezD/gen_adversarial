@@ -256,13 +256,15 @@ class AutoAttack:
            :param gt_label: ground truth label of shape (1,)
            :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
         """
-        def update_result(s_0, b_0, s_1, b_1, a_1):
-            print(s_1, b_1)
+        def update_result(s_0, b_0, a_0, s_1, b_1, a_1):
+
             if s_1 and not s_0:
                 return s_1, b_1, a_1
             elif s_1 and s_0:
                 if b_1 < b_0:
                     return s_0, b_1, a_1
+            else:
+                return s_0, b_0, a_0
 
         # apply all attacks, keeping best result
 
@@ -275,11 +277,11 @@ class AutoAttack:
         # does not work with less than 3 classes
         if preds.shape[1] > 3:
             s, b, a = self.apgd_dlr(image, gt_label, net)
-            success, best_bound, best_adv = update_result(success, best_bound, s, b, a)
+            success, best_bound, best_adv = update_result(success, best_bound, best_adv, s, b, a)
 
         # FAB attack
         s, b, a = self.fab(image, gt_label, net)
-        success, best_bound, best_adv = update_result(success, best_bound, s, b, a)
+        success, best_bound, best_adv = update_result(success, best_bound, best_adv, s, b, a)
 
         return success, best_bound, best_adv
 
