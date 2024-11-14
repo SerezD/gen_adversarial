@@ -67,13 +67,13 @@ def parse_args():
     parser.add_argument('--config', type=str, required=True,
                         help='Path to .yaml configuration file with the Defense Model information.')
 
-    parser.add_argument('--attack', type=str, choices=['deepfool', 'c&w'], default=None,
+    parser.add_argument('--attack', type=str, choices=['deepfool', 'c&w', 'autoattack'], default=None,
                         help='If passed, try a specific attack only. Otherwise, try all.')
 
     args = parser.parse_args()
 
     # create results folder
-    args.results_folder = f'./results/{args.config.split('/')[-1][:-5]}/'
+    args.results_folder = f'./results/{args.config.split("/")[-1][:-5]}/'
 
     if not os.path.exists(args.results_folder):
         os.makedirs(args.results_folder)
@@ -115,7 +115,13 @@ def main(rank, world_size, args):
     dataset = ImageLabelDataset(folder=args.images_path, image_size=args.image_size)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, sampler=DistributedSampler(dataset, shuffle=False))
 
-    success_rates = torch.empty((3, len(args.bounds_l2), 0), device=args.device)
+    clean_accuracy = torch.empty((0, 1), device=args.device)
+    df_distortions = torch.empty((0, 1), device=args.device)
+    cw_distortions = torch.empty((0, 1), device=args.device)
+    aa_distortions = torch.empty((0, 1), device=args.device)
+
+    # TODO REMOVE THE FOLLOWING
+    # success_rates = torch.empty((3, len(args.bounds_l2), 0), device=args.device)
 
     for idx, (images, labels) in enumerate(tqdm(dataloader)):
 
@@ -129,45 +135,97 @@ def main(rank, world_size, args):
         # test "no attack"
         with torch.no_grad():
             preds = defense_model(images)
-            success_0 = torch.ne(preds.argmax(dim=1), labels)
-            success_0 = success_0.unsqueeze(0).repeat(len(args.bounds_l2), 1)  # just copy on every bound
+            clean_accuracy = torch.cat((clean_accuracy, torch.eq(preds.argmax(dim=1), labels).unsqueeze(0)), 0)
+
+            # TODO REMOVE THE FOLLOWING
+            # success_0 = torch.ne(preds.argmax(dim=1), labels)
+            # success_0 = success_0.unsqueeze(0).repeat(len(args.bounds_l2), 1)  # just copy on every bound
 
         # DEEP FOOL
         if args.attack is None or args.attack == 'deepfool':
             succeeded_df, minimum_bound_df, adversarial_df = args.attacks['deepfool'](images, labels, defense_model)
-            success_1 = torch.zeros_like(success_0, dtype=torch.bool)
-            for i, b in enumerate(args.bounds_l2):
-                if succeeded_df and minimum_bound_df <= b:
-                    success_1[i] = True
+
+            if succeeded_df:
+                df_distortions = torch.cat((df_distortions,
+                                            torch.tensor([[minimum_bound_df]], device=args.device)))
+            else:
+                df_distortions = torch.cat((df_distortions,
+                                            torch.tensor([[100.]], device=args.device)))
+
+            # TODO REMOVE THE FOLLOWING
+            # success_1 = torch.zeros_like(success_0, dtype=torch.bool)
+            # for i, b in enumerate(args.bounds_l2):
+            #     if succeeded_df and minimum_bound_df <= b:
+            #         success_1[i] = True
+
         else:
             if rank == 0 and idx == 0:
                 print('Skipping DeepFool')
-            success_1 = torch.zeros_like(success_0, dtype=torch.bool)
+
+            df_distortions = torch.cat((df_distortions, torch.tensor([[0.]], device=args.device)))
             succeeded_df = False
             minimum_bound_df = 0.
             adversarial_df = images.detach().clone()
 
+            # TODO REMOVE THE FOLLOWING
+            # success_1 = torch.zeros_like(success_0, dtype=torch.bool)
+
         # C&W
         if args.attack is None or args.attack == 'c&w':
 
-            succeeded_cw, minimum_bound_cw, adversarial_cw = args.attacks['cw'](images, labels, defense_model)
-            success_2 = torch.zeros_like(success_0, dtype=torch.bool)
-            for i, b in enumerate(args.bounds_l2):
-                if succeeded_cw and minimum_bound_cw <= b:
-                    success_2[i] = True
+            succeeded_cw, minimum_bound_cw, adversarial_cw = args.attacks['c&w'](images, labels, defense_model)
+
+            if succeeded_cw:
+                cw_distortions = torch.cat((cw_distortions,
+                                            torch.tensor([[minimum_bound_cw]], device=args.device)))
+            else:
+                cw_distortions = torch.cat((cw_distortions,
+                                            torch.tensor([[100.]], device=args.device)))
+
+            # TODO REMOVE THE FOLLOWING
+            # success_2 = torch.zeros_like(success_0, dtype=torch.bool)
+            # for i, b in enumerate(args.bounds_l2):
+            #     if succeeded_cw and minimum_bound_cw <= b:
+            #         success_2[i] = True
         else:
 
             if rank == 0 and idx == 0:
                 print('Skipping C&W')
 
-            success_2 = torch.zeros_like(success_0, dtype=torch.bool)
+            cw_distortions = torch.cat((cw_distortions, torch.tensor([[0.]], device=args.device)))
             succeeded_cw = False
             minimum_bound_cw = 0.0
             adversarial_cw = images.detach().clone()
 
-        # cat results
-        success_rates = torch.cat((success_rates,
-                                   torch.stack((success_0, success_1, success_2), dim=0)), dim=2)
+            # TODO REMOVE THE FOLLOWING
+            # success_2 = torch.zeros_like(success_0, dtype=torch.bool)
+
+        # C&W
+        if args.attack is None or args.attack == 'autoattack':
+
+            succeeded_aa, minimum_bound_aa, adversarial_aa = args.attacks['autoattack'](images, labels, defense_model)
+
+            if succeeded_aa:
+                aa_distortions = torch.cat((aa_distortions,
+                                            torch.tensor([[minimum_bound_aa]], device=args.device)))
+            else:
+                aa_distortions = torch.cat((aa_distortions,
+                                            torch.tensor([[100.]], device=args.device)))
+
+        else:
+
+            if rank == 0 and idx == 0:
+                print('Skipping AutoAttack')
+
+            aa_distortions = torch.cat((aa_distortions, torch.tensor([[0.]], device=args.device)))
+            succeeded_aa = False
+            minimum_bound_aa = 0.0
+            adversarial_aa = images.detach().clone()
+
+        # TODO REMOVE THE FOLLOWING
+        # # cat results
+        # success_rates = torch.cat((success_rates,
+        #                            torch.stack((success_0, success_1, success_2), dim=0)), dim=2)
 
         # save visual examples of applied perturbation.
         if rank == 0 and idx % 5 == 0:
@@ -178,15 +236,18 @@ def main(rank, world_size, args):
                 pad_size = int(np.log2(args.image_size))
                 images = pad_image(images, False, pad_size)
 
-                for (success, bound, adv_example, name) in zip([succeeded_df, succeeded_cw],
-                                                               [minimum_bound_df, minimum_bound_cw],
-                                                               [adversarial_df, adversarial_cw], ['deep_fool', 'C&W']):
+                for (success, bound, adv_example, name) in zip([succeeded_df, succeeded_cw, succeeded_aa],
+                                                               [minimum_bound_df, minimum_bound_cw, minimum_bound_aa],
+                                                               [adversarial_df, adversarial_cw, adversarial_aa],
+                                                               ['deep_fool', 'C&W', 'AutoAttack']):
 
                     # skip attack if not computed.
                     if args.attack is not None:
                         if name == 'deep_fool' and args.attack != 'deepfool':
                             continue
                         elif name == 'C&W' and args.attack != 'c&w':
+                            continue
+                        elif name == 'AutoAttack' and args.attack != 'autoattack':
                             continue
 
                     # estimate of the cleaned image (estimate because the process is random)
@@ -205,10 +266,26 @@ def main(rank, world_size, args):
                     plt.close()
 
     #  Gather results of different ranks
-    gathered_success_rates = [torch.zeros_like(success_rates) for _ in range(world_size)]
-    torch.distributed.all_gather(gathered_success_rates, success_rates)
-    gathered_success_rates = torch.cat(gathered_success_rates, dim=1)
-    success_rates = gathered_success_rates.mean(dim=-1)
+    gathered_clean_accuracy = [torch.zeros_like(clean_accuracy) for _ in range(world_size)]
+    gathered_df_distortions = [torch.zeros_like(df_distortions) for _ in range(world_size)]
+    gathered_cw_distortions = [torch.zeros_like(cw_distortions) for _ in range(world_size)]
+    gathered_aa_distortions = [torch.zeros_like(aa_distortions) for _ in range(world_size)]
+
+    torch.distributed.all_gather(gathered_clean_accuracy, clean_accuracy)
+    torch.distributed.all_gather(gathered_df_distortions, df_distortions)
+    torch.distributed.all_gather(gathered_cw_distortions, cw_distortions)
+    torch.distributed.all_gather(gathered_aa_distortions, aa_distortions)
+
+    clean_accuracy = torch.cat(gathered_clean_accuracy, dim=0).squeeze(1).mean(dim=0).item()
+    df_distortions = torch.cat(gathered_df_distortions, dim=0).squeeze(1).cpu().tolist()
+    cw_distortions = torch.cat(gathered_cw_distortions, dim=0).squeeze(1).cpu().tolist()
+    aa_distortions = torch.cat(gathered_aa_distortions, dim=0).squeeze(1).cpu().tolist()
+
+    # TODO REMOVE THE FOLLOWING
+    # gathered_success_rates = [torch.zeros_like(success_rates) for _ in range(world_size)]
+    # torch.distributed.all_gather(gathered_success_rates, success_rates)
+    # gathered_success_rates = torch.cat(gathered_success_rates, dim=1)
+    # success_rates = gathered_success_rates.mean(dim=-1)
 
     if rank == 0:
 
@@ -222,19 +299,34 @@ def main(rank, world_size, args):
             res_dict = {}
 
         # update, write on dict
-        for a_i, attack in enumerate(['Clean', 'DeepFool', 'C&W']):
+        for a_i, attack in enumerate(['Clean', 'DeepFool', 'C&W', 'AutoAttack']):
 
+            # SKIP If not computed
             if args.attack is not None:
                 if attack == 'DeepFool' and args.attack != 'deepfool':
                     continue
                 elif attack == 'C&W' and args.attack != 'c&w':
                     continue
+                elif name == 'AutoAttack' and args.attack != 'autoattack':
+                    continue
 
-            for b_i, bound in enumerate(args.bounds_l2):
-                if attack == 'Clean':
-                    res_dict[f'{attack}'] = success_rates[a_i][b_i].item()
-                    break
-                res_dict[f'{attack}_{bound}'] = success_rates[a_i][b_i].item()
+            if attack == 'Clean':
+                value = clean_accuracy
+            elif attack == 'DeepFool':
+                value = df_distortions
+            elif attack == 'C&W':
+                value = cw_distortions
+            else:
+                value = aa_distortions
+
+            res_dict[f'{attack}'] = value
+
+            # TODO REMOVE THE FOLLOWING
+            # for b_i, bound in enumerate(args.bounds_l2):
+            #     if attack == 'Clean':
+            #         res_dict[f'{attack}'] = success_rates[a_i][b_i].item()
+            #         break
+            #     res_dict[f'{attack}_{bound}'] = success_rates[a_i][b_i].item()
 
         # write or overwrite/update
         with open(json_dest_file, 'w') as f:

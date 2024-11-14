@@ -3,7 +3,7 @@ from argparse import Namespace
 import torch
 import yaml
 
-from src.attacks.untargeted import DeepFool, CW
+from src.attacks.untargeted import DeepFool, CW, AutoAttack
 from src.defenses.competitors.a_vae.model import StyledGenerator
 from src.defenses.competitors.a_vae.purification_model import AVaeDefenseModel
 from src.defenses.competitors.nd_vae.purification_model import NDVaeDefenseModel
@@ -13,7 +13,8 @@ from src.defenses.ours.models import CelebaGenderClassifier, CelebaIdentityClass
 from src.defenses.ablations.models import GaussianNoiseDefenseModel, GaussianBlurDefenseModel
 from src.defenses.wrappers import EoTWrapper
 
-
+# TODO we should increase C in C&W attack to achieve perturbations with an higher value
+# TODO remove args.bounds_l2
 def load(args):
     """
     :return updated args, defense model
@@ -32,7 +33,9 @@ def load(args):
 
         args.attacks = {
             'deepfool': DeepFool(num_classes=2, overshoot=0.02, max_iter=128),
-            'cw': CW(c=16., kappa=0.05, steps=8192, lr=1e-3)
+            # 'c&w': CW(c=16., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
+            'c&w': CW(c=16., kappa=0.02, steps=512, lr=1e-3),  # CR TIME !
+            'autoattack': AutoAttack()  # TODO update hps
         }
 
         base_classifier = CelebaGenderClassifier(d_params.classifier_path, args.device)
@@ -48,7 +51,9 @@ def load(args):
 
         args.attacks = {
             'deepfool': DeepFool(num_classes=8, overshoot=0.02, max_iter=128),
-            'cw': CW(c=8., kappa=0.05, steps=8192, lr=1e-3)
+            # 'c&w': CW(c=8., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
+            'c&w': CW(c=8., kappa=0.02, steps=512, lr=1e-3),  # CR TIME !
+            'autoattack': AutoAttack()  # TODO update hps
         }
 
         base_classifier = CelebaIdentityClassifier(d_params.classifier_path, args.device)
@@ -64,7 +69,9 @@ def load(args):
 
         args.attacks = {
             'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=128),
-            'cw': CW(c=8., kappa=0.02, steps=8192, lr=1e-3)
+            # 'c&w': CW(c=8., kappa=0.02, steps=8192, lr=1e-3),  # SUBMISSION TIME!
+            'c&w': CW(c=12., kappa=0.02, steps=512, lr=1e-3),  # CR TIME !
+            'autoattack': AutoAttack()  # TODO update hps
         }
 
         base_classifier = CarsTypeClassifier(d_params.classifier_path, args.device)

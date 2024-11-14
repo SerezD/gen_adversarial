@@ -1,10 +1,287 @@
 import collections
+import math
 
 import numpy as np
 from torch import nn, optim
 from torch.autograd import Variable
 import torch as torch
 import copy
+
+# TODO CREATE ABSTRACT ATTACK With CALL method.
+
+
+def l2_norm(x: torch.Tensor, keepdim=False):
+
+    z = (x ** 2).view(-1).sum().sqrt()
+    if keepdim:
+        z = z.view(1, 1, 1, 1)
+    return z
+
+
+def normalize(x: torch.Tensor):
+    """
+    :param x: tensor to normalize
+    :return: L2 normalized tensor
+    """
+    return x / l2_norm(x)
+
+
+class APGDAttack:
+    def __init__(self, n_iter: int, rho: float, max_bound: float, ce_loss: bool):
+        """
+            Implementation of APGD-CE and APGD-DLR attack
+            cloned and adapted from https://github.com/fra31/auto-attack/blob/master/autoattack/autopgd_base.py
+            uses l2-bound and untargeted setup.
+
+            :param n_iter: number of iterations
+            :param rho: parameter for decreasing the step size
+            :param max_bound: maximum allowed L2 bound to deem the perturbation successful
+            :param ce_loss: whether to use CE (cross entropy) loss or DLR (Difference of Logits Ratio) loss
+        """
+
+        self.n_iter = n_iter
+        self.rho = rho
+        self.max_bound = max_bound
+
+        if ce_loss:
+            self.criterion = nn.CrossEntropyLoss(reduction='none')
+        else:
+            self.criterion = self.dlr_loss
+
+        # constant to avoid 0 division error
+        self.division_eps = 1e-12
+
+        # parameters to modify step size
+        self.initial_step_size_iters = max(int(0.22 * n_iter), 1)
+        self.min_step_size_iters = max(int(0.06 * n_iter), 1)
+        self.step_size_decr = max(int(0.03 * n_iter), 1)
+
+    def check_loss_oscillation(self, all_losses: torch.Tensor, step: int, lookback: int):
+        """
+        :param all_losses: all loss values from all iters
+        :param step: current step of iterations
+        :param lookback: how many values to check in the past from step.
+        :return True if loss has not increased at least fixed-threshold times (should change step size)
+        """
+
+        # how many loss values to consider?
+        prev_losses = all_losses[step - (lookback - 1): step + 1]
+
+        # check number of times loss increased
+        shifted_prev_losses = torch.roll(prev_losses, shifts=1, dims=0)
+        shifted_prev_losses[0] = prev_losses[0]
+        n_loss_incr = torch.gt(prev_losses, shifted_prev_losses).sum().item()
+
+        # if loss is not increasing anymore, then the attack is loosing effectiveness!
+        return n_loss_incr < lookback * self.rho
+
+    def dlr_loss(self, logits: torch.Tensor, gt_label: torch.Tensor):
+        """
+        :param logits: prediction logits, with shape (1, N_Classes)
+        :param gt_label: ground truth label of shape (1,)
+
+        :return Loss computed as -(Logit[GT] - Logit[Highest Wrong Prediction]) / (Highest Logit - 3rd Highest Logit)
+        """
+
+        _, n = logits.shape
+
+        if n < 4:
+            # CHECK https://github.com/fra31/auto-attack/issues/70
+            raise AttributeError('APGD_DLR is undefined for problems with less than 4 classes!')
+
+        # sort predictions in ascending order
+        logits_sorted, logits_indices_sorted = logits.sort(dim=1)
+
+        # check if attack is successful or not.
+        attack_failed = torch.eq(logits_indices_sorted[:, -1], gt_label).item()
+
+        # Compute Loss
+        correct_logit = logits[0, gt_label]
+        highest_wrong_logit = logits_sorted[:, -2] if attack_failed else logits_sorted[:, -1]
+        numerator = -(correct_logit - highest_wrong_logit)  # encourage the highest wrong logit to increase
+
+        highest_logit = logits_sorted[:, -1]
+
+        # normalizer term can lead to vanishing gradient
+        # check https://github.com/fra31/auto-attack/issues/108
+        if torch.ne(logits_sorted[:, -3], correct_logit):
+            normalizer_term = logits_sorted[:, -3]
+        else:
+            normalizer_term = logits_sorted[:, -4]
+
+        denominator = highest_logit - normalizer_term + self.division_eps
+
+        return numerator / denominator
+
+    def __call__(self, image, gt_label, net):
+        """
+           :param image: Image of size 1, 3, H, W
+           :param gt_label: ground truth label of shape (1,)
+           :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
+        """
+
+        device = image.device
+
+        # get initial adversarial image
+        initial_noise = normalize(torch.randn_like(image))
+
+        x_adv = (image + self.max_bound * initial_noise).clamp(0., 1.)
+
+        # save for next round
+        x_adv_old = x_adv.clone()
+
+        # get first gradient
+        x_adv = x_adv.requires_grad_()
+        with torch.enable_grad():
+            logits = net(x_adv)
+            loss = self.criterion(logits, gt_label)
+
+        grad = torch.autograd.grad(loss, [x_adv])[0].detach()
+
+        # initialize step size parameters
+        step_size = 2 * self.max_bound
+
+        # counters
+        update_step_size_counter = 0
+        step_size_iters = self.initial_step_size_iters
+
+        # update based on previous losses
+        loss_steps = torch.zeros([self.n_iter, 1]).to(device)
+
+        # keep track if step size has been decreased previously
+        reduced_last_check = True  # start with true ?
+
+        # save best loss and previous best loss to decide if step size should be decreased
+        best_loss = loss.item()
+        prev_best_loss = loss.item()
+
+        # save best result to restart from there
+        x_best = x_adv.clone()
+        grad_best = grad.clone()
+
+        # start iterations
+        for i in range(self.n_iter):
+
+            # get new adv based on gradient information
+            with torch.no_grad():
+
+                # get adv diff
+                x_adv = x_adv.detach()
+                grad2 = x_adv - x_adv_old
+                x_adv_old = x_adv.clone()
+
+                # update x_adv
+                a = 0.75 if i > 0 else 1.0
+
+                # update using grad
+                new_adv = x_adv + step_size * normalize(grad)
+                new_adv = normalize(new_adv - image) * torch.min(self.max_bound * torch.ones_like(image).detach(),
+                                                                 l2_norm(new_adv - image, keepdim=True))
+                new_adv = torch.clamp(image + new_adv, 0., 1.)
+
+                # update using grad 2
+                new_adv = x_adv + (new_adv - x_adv) * a + grad2 * (1 - a)
+                new_adv = normalize(new_adv - image) * torch.min(self.max_bound * torch.ones_like(image).detach(),
+                                                                 l2_norm(new_adv - image, keepdim=True))
+                x_adv = torch.clamp(image + new_adv, 0., 1.)
+
+            # get new gradient based on adv loss
+            x_adv = x_adv.requires_grad_()
+            with torch.enable_grad():
+                logits = net(x_adv)
+                loss = self.criterion(logits, gt_label)
+
+            grad = torch.autograd.grad(loss, [x_adv])[0].detach()
+
+            # update step size if needed
+            with torch.no_grad():
+
+                # append new loss
+                loss_steps[i] = loss.item()
+
+                # update params if needed
+                if loss.item() > best_loss:
+                    best_loss = loss.item()
+                    x_best = x_adv.clone()
+                    grad_best = grad.clone()
+
+                # check if step size must be updated
+                update_step_size_counter += 1
+                if update_step_size_counter == step_size_iters:
+
+                    # update step size based on two conditions
+                    loss_not_increasing = self.check_loss_oscillation(loss_steps, i, update_step_size_counter)
+
+                    no_improvement = prev_best_loss >= best_loss
+
+                    reduce_step_size = loss_not_increasing or (no_improvement and not reduced_last_check)
+
+                    # update for next round
+                    reduced_last_check = reduce_step_size
+                    prev_best_loss = best_loss
+
+                    if reduce_step_size:
+
+                        # halve step size and restart from best result.
+                        step_size /= 2.0
+                        x_adv = x_best.clone()
+                        grad = grad_best.clone()
+
+                    # reset counters
+                    update_step_size_counter = 0
+                    step_size_iters = max(step_size_iters - self.step_size_decr, self.min_step_size_iters)
+
+        # return best guess
+        succeed = torch.ne(net(x_adv).argmax(dim=1), gt_label).item()
+        bound = torch.linalg.norm((x_adv.detach() - image.detach()).flatten(), ord=2).item()
+        return succeed, bound, x_adv.detach()
+
+
+class AutoAttack:
+    def __init__(self):
+        """
+        Implementation of AutoAttack
+        cloned and adapted from https://github.com/fra31/auto-attack/blob/master/autoattack/autoattack.py
+        uses l2-bound and untargeted setup.
+        """
+
+        # three attacks to test in sequence (Square Attack is not tested)
+        self.apgd_ce = APGDAttack(n_iter=100, rho=0.75, max_bound=1.0, ce_loss=True)
+        self.apgd_dlr = APGDAttack(n_iter=100, rho=0.75, max_bound=1.0, ce_loss=False)
+        self.fab = FABAttack(n_iter=100, alpha_max=0.1, eta=1.05, beta=0.9)
+
+    def __call__(self, image, gt_label, net):
+        """
+           :param image: Image of size 1, 3, H, W
+           :param gt_label: ground truth label of shape (1,)
+           :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
+        """
+        def update_result(s_0, b_0, s_1, b_1, a_1):
+            print(s_1, b_1)
+            if s_1 and not s_0:
+                return s_1, b_1, a_1
+            elif s_1 and s_0:
+                if b_1 < b_0:
+                    return s_0, b_1, a_1
+
+        # apply all attacks, keeping best result
+
+        success, best_bound, best_adv = self.apgd_ce(image, gt_label, net)
+
+        # to apply apgd_dlr check the number of classes
+        with torch.no_grad():
+            preds = net(image)
+
+        # does not work with less than 3 classes
+        if preds.shape[1] > 3:
+            s, b, a = self.apgd_dlr(image, gt_label, net)
+            success, best_bound, best_adv = update_result(success, best_bound, s, b, a)
+
+        # FAB attack
+        s, b, a = self.fab(image, gt_label, net)
+        success, best_bound, best_adv = update_result(success, best_bound, s, b, a)
+
+        return success, best_bound, best_adv
 
 
 class CW:
@@ -16,7 +293,6 @@ class CW:
            :param kappa: also written as 'confidence'
            :param steps: number of steps
            :param lr: learning rate of the Adam optimizer.
-           :param amp: if true, use Automatic Mixed Precision
         """
         self.c = c
         self.kappa = kappa
@@ -39,7 +315,7 @@ class CW:
     def __call__(self, image, label, net):
         """
        :param image: Image of size HxWx3
-       :param ground truth label
+       :param label: ground truth label of shape (1,)
        :param net: network (input: images, output: values of activation **BEFORE** softmax).
         """
 
@@ -142,7 +418,7 @@ class DeepFool:
         cloned and adapted from https://github.com/LTS4/DeepFool/blob/master/Python/deepfool.py
 
            :param image: Image of size HxWx3
-           :param ground truth label
+           :param gt_label: truth label of shape (1,)
            :param net: network (input: images, output: values of activation **BEFORE** softmax).
         """
 
@@ -192,7 +468,7 @@ class DeepFool:
 
             # compute r_i and r_tot
             # Added 1e-4 for numerical stability
-            r_i =  (pert+1e-4) * w / np.linalg.norm(w)
+            r_i = (pert+1e-4) * w / np.linalg.norm(w)
             r_tot = np.float32(r_tot + r_i)
 
             pert_image = image + (1+self.overshoot)*torch.from_numpy(r_tot).to(image.device)
@@ -210,6 +486,194 @@ class DeepFool:
             return False, np.inf, image.detach()
 
         return True, np.linalg.norm(r_tot.flatten(), 2), pert_image.detach()
+
+
+class FABAttack:
+    def __init__(self, n_iter: int, alpha_max: float, eta: float, beta: bool):
+        """
+            Implementation of FAB attack
+            cloned and adapted from https://github.com/fra31/auto-attack/blob/master/autoattack/fab_base.py
+            uses l2-bound and untargeted setup.
+
+            :param n_iter: number of iterations
+            :param alpha_max: maximum step size
+            :param eta: overshoot over the boundary
+            :param beta: backward step
+        """
+
+        self.n_iter = n_iter
+        self.eta = eta
+        self.beta = beta
+        self.alpha_max = alpha_max
+
+    def get_diff_logits_grads(self, image: torch.Tensor, label: torch.Tensor, net: torch.nn.Module):
+        """
+        Compute the gradients of the logit difference
+        :param image: shape (1, 3, H, W)
+        :param label: shape (1, )
+        :param net: classifier with logits output
+        """
+        def zero_gradients(x):
+            if isinstance(x, torch.Tensor):
+                if x.grad is not None:
+                    x.grad.detach_()
+                    x.grad.zero_()
+            elif isinstance(x, collections.abc.Iterable):
+                for elem in x:
+                    zero_gradients(elem)
+
+        image = image.clone().requires_grad_()
+        with torch.enable_grad():
+            y = net(image)
+
+        n_classes = y.shape[1]
+
+        g2 = torch.zeros([n_classes, *image.size()], device=image.device)
+        grad_mask = torch.zeros_like(y)
+        for i in range(n_classes):
+            zero_gradients(image)
+            grad_mask[:, i] = 1.0
+            y.backward(grad_mask, retain_graph=True)
+            grad_mask[:, i] = 0.0
+            g2[i] = image.grad.data
+
+        g2 = torch.transpose(g2, 0, 1).detach()
+        y2 = y.detach()
+        df = y2 - y2[:, label]
+        dg = g2 - g2[:, label]
+        df[:, label] = 1e10
+
+        return df, dg
+
+    def projection_l2(self, points_to_project, w_hyperplane, b_hyperplane):
+
+        device = points_to_project.device
+        t, w, b = points_to_project, w_hyperplane.clone(), b_hyperplane
+
+        c = (w * t).sum(dim=1) - b[:, 0]
+        ind2 = 2 * (c >= 0) - 1
+        w.mul_(ind2.unsqueeze(1))
+        c.mul_(ind2)
+
+        r = torch.max(t / w, (t - 1) / w).clamp(min=-1e12, max=1e12)
+        r.masked_fill_(w.abs() < 1e-8, 1e12)
+        r[r == -1e12] *= -1
+        rs, indr = torch.sort(r, dim=1)
+        rs2 = torch.nn.functional.pad(rs[:, 1:], (0, 1))
+        rs.masked_fill_(rs == 1e12, 0)
+        rs2.masked_fill_(rs2 == 1e12, 0)
+
+        w3s = (w ** 2).gather(1, indr)
+        w5 = w3s.sum(dim=1, keepdim=True)
+        ws = w5 - torch.cumsum(w3s, dim=1)
+        d = -(r * w)
+        d.mul_((w.abs() > 1e-8).float())
+        s = torch.cat((-w5 * rs[:, 0:1], torch.cumsum((-rs2 + rs) * ws, dim=1) - w5 * rs[:, 0:1]), 1)
+
+        c4 = s[:, 0] + c < 0
+        c3 = (d * w).sum(dim=1) + c > 0
+        c2 = ~(c4 | c3)
+
+        lb = torch.zeros(c2.sum(), device=device)
+        ub = torch.full_like(lb, w.shape[1] - 1)
+        nitermax = math.ceil(math.log2(w.shape[1]))
+
+        s_, c_ = s[c2], c[c2]
+        for counter in range(nitermax):
+            counter4 = torch.floor((lb + ub) / 2)
+            counter2 = counter4.long().unsqueeze(1)
+            c3 = s_.gather(1, counter2).squeeze(1) + c_ > 0
+            lb = torch.where(c3, counter4, lb)
+            ub = torch.where(c3, ub, counter4)
+
+        lb = lb.long()
+
+        if c4.any():
+            alpha = c[c4] / w5[c4].squeeze(-1)
+            d[c4] = -alpha.unsqueeze(-1) * w[c4]
+
+        if c2.any():
+            alpha = (s[c2, lb] + c[c2]) / ws[c2, lb] + rs[c2, lb]
+            alpha[ws[c2, lb] == 0] = 0
+            c5 = (alpha.unsqueeze(-1) > r[c2]).float()
+            d[c2] = d[c2] * c5 - alpha.unsqueeze(-1) * w[c2] * (1 - c5)
+
+        return d * (w.abs() > 1e-8).float()
+
+    def __call__(self, image, gt_label, net):
+        """
+           :param image: Image of size 1, 3, H, W
+           :param gt_label: ground truth label of shape (1,)
+           :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
+        """
+
+        device = image.device
+        image = image.detach().clone()
+
+        # check pred
+        with torch.no_grad():
+            pred = torch.argmax(net(image))
+        if pred != gt_label:
+            return True, 0.0, image.detach()
+
+        # initialization
+        x_adv = image.clone()
+        bound = 1e10
+        succeed = False
+
+        x_orig = image.clone()
+        x_i = image.clone()  # first iteration is x_orig
+        x_orig_flat = image.clone().view(1, -1)
+
+        for _ in range(self.n_iter):
+
+            with torch.no_grad():
+
+                # get class s with the decision hyperplane closest to current adv
+                # (Equation 7 of the paper)
+                df, dg = self.get_diff_logits_grads(x_i, gt_label, net)
+                dist = df.abs() / (1e-12 + (dg ** 2).reshape(1, df.shape[1], -1).sum(dim=-1).sqrt())
+                closest_class_index = dist.min(dim=1).indices
+
+                # projections
+                dg2 = dg[:, closest_class_index]
+                b = - df[:, closest_class_index] + (dg2 * x_i).view(1, -1).sum(dim=-1)
+                w = dg2.view([1, -1])
+
+                # these are both projections
+                d3 = self.projection_l2(
+                    torch.cat((x_i.view(1, -1), x_orig_flat), 0),
+                    torch.cat((w, w), 0),
+                    torch.cat((b, b), 0))
+
+                # these are di, d_orig
+                d1 = torch.reshape(d3[:1], x_i.shape)
+                d2 = torch.reshape(d3[-1:], x_i.shape)
+
+                # get alpha (equation 9)
+                a0 = (d3 ** 2).sum(dim=1, keepdim=True).sqrt().view(-1, 1, 1, 1)
+                a0 = torch.max(a0, 1e-8 * torch.ones_like(a0))
+                a1 = a0[:1]
+                a2 = a0[-1:]
+
+                alpha = torch.max(a1 / (a1 + a2), torch.zeros_like(a1))
+                alpha = torch.min(alpha, self.alpha_max * torch.ones_like(a1))
+
+                # update x_i
+                x_i = ((x_i + self.eta * d1) * (1 - alpha) + (x_orig + d2 * self.eta) * alpha).clamp(0.0, 1.0)
+
+                # update adv, min_bound if x_i is adv
+                succeed_i = torch.ne(net(x_adv).argmax(dim=1), gt_label).item()
+                if succeed_i:
+                    succeed = True
+                    t = ((x_i - x_orig) ** 2).view(1, -1).sum(dim=-1).sqrt().item()
+                    if t < bound:
+                        x_adv = x_i.clone()
+                        bound = t
+                    x_i = (1 - self.beta) * x_orig + self.beta * x_i
+
+        # return best guess
+        return succeed, bound, x_adv.detach()
 
 
 class FGSM:
