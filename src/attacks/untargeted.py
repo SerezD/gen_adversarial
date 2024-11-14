@@ -268,8 +268,7 @@ class AutoAttack:
             elif s_1 and s_0:
                 if b_1 < b_0:
                     return s_0, b_1, a_1
-            else:
-                return s_0, b_0, a_0
+            return s_0, b_0, a_0
 
         # apply all attacks, keeping best result
 
@@ -693,7 +692,7 @@ class FABAttack:
                 x_i = ((x_i + self.eta * d1) * (1 - alpha) + (x_orig + d2 * self.eta) * alpha).clamp(0.0, 1.0)
 
                 # update adv, min_bound if x_i is adv
-                succeed_i = torch.ne(net(x_adv).argmax(dim=1), gt_label).item()
+                succeed_i = torch.ne(net(x_i).argmax(dim=1), gt_label).item()
                 if succeed_i:
                     succeed = True
                     t = ((x_i - x_orig) ** 2).view(1, -1).sum(dim=-1).sqrt().item()
