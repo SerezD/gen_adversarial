@@ -246,9 +246,14 @@ class AutoAttack:
         """
 
         # three attacks to test in sequence (Square Attack is not tested)
-        self.apgd_ce = APGDAttack(n_iter=100, rho=0.75, max_bound=1.0, ce_loss=True)
-        self.apgd_dlr = APGDAttack(n_iter=100, rho=0.75, max_bound=1.0, ce_loss=False)
-        self.fab = FABAttack(n_iter=100, alpha_max=0.1, eta=1.05, beta=0.9)
+        # we use different bounds for apgd, since we are interested in minimizing it
+        self.apgd_ce1 = APGDAttack(n_iter=64, rho=0.75, max_bound=0.5, ce_loss=True)
+        self.apgd_ce2 = APGDAttack(n_iter=64, rho=0.75, max_bound=1.0, ce_loss=True)
+        self.apgd_ce3 = APGDAttack(n_iter=64, rho=0.75, max_bound=4.0, ce_loss=True)
+        self.apgd_dlr1 = APGDAttack(n_iter=64, rho=0.75, max_bound=0.5, ce_loss=False)
+        self.apgd_dlr2 = APGDAttack(n_iter=64, rho=0.75, max_bound=2.0, ce_loss=False)
+        self.apgd_dlr3 = APGDAttack(n_iter=64, rho=0.75, max_bound=4.0, ce_loss=False)
+        self.fab = FABAttack(n_iter=128, alpha_max=0.1, eta=1.05, beta=0.9)
 
     def __call__(self, image, gt_label, net):
         """
@@ -268,16 +273,39 @@ class AutoAttack:
 
         # apply all attacks, keeping best result
 
-        success, best_bound, best_adv = self.apgd_ce(image, gt_label, net)
+        # APGD-CE (three bounds)
+        success, best_bound, best_adv = self.apgd_ce1(image, gt_label, net)
 
+        # test higher bound only if not passed
+        if not success:
+            s, b, a = self.apgd_ce2(image, gt_label, net)
+            success, best_bound, best_adv = update_result(success, best_bound, best_adv, s, b, a)
+
+            if not success:
+                s, b, a = self.apgd_ce3(image, gt_label, net)
+                success, best_bound, best_adv = update_result(success, best_bound, best_adv, s, b, a)
+
+        # APGD-DLR (three bounds)
         # to apply apgd_dlr check the number of classes
         with torch.no_grad():
             preds = net(image)
 
         # does not work with less than 3 classes
         if preds.shape[1] > 3:
-            s, b, a = self.apgd_dlr(image, gt_label, net)
-            success, best_bound, best_adv = update_result(success, best_bound, best_adv, s, b, a)
+
+            # Test three increasing bounds
+            s1, b1, a1 = self.apgd_dlr1(image, gt_label, net)
+
+            # test higher bound only if not passed
+            if not s1:
+                s, b, a = self.apgd_dlr2(image, gt_label, net)
+                s1, b1, a1 = update_result(s1, b1, a1, s, b, a)
+
+                if not s1:
+                    s, b, a = self.apgd_dlr3(image, gt_label, net)
+                    s1, b1, a1 = update_result(s1, b1, a1, s, b, a)
+
+            success, best_bound, best_adv = update_result(success, best_bound, best_adv, s1, b1, a1)
 
         # FAB attack
         s, b, a = self.fab(image, gt_label, net)
