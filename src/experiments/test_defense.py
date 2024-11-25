@@ -307,7 +307,7 @@ def main(rank, world_size, args):
                     continue
                 elif attack == 'C&W' and args.attack != 'c&w':
                     continue
-                elif name == 'AutoAttack' and args.attack != 'autoattack':
+                elif attack == 'AutoAttack' and args.attack != 'autoattack':
                     continue
 
             if attack == 'Clean':

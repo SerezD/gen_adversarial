@@ -35,7 +35,7 @@ def load(args):
         args.attacks = {
             'deepfool': DeepFool(num_classes=2, overshoot=0.02, max_iter=128),
             # 'c&w': CW(c=16., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
-            'c&w': CW(c=16., kappa=0.02, steps=512, lr=1e-3),  # CR TIME !
+            'c&w': CW(c=64., kappa=0.01, steps=1024, lr=1e-3, n_restarts=8, early_stopping_steps=32),  # CR TIME !
             'autoattack': AutoAttack()
         }
 
@@ -53,7 +53,7 @@ def load(args):
         args.attacks = {
             'deepfool': DeepFool(num_classes=8, overshoot=0.02, max_iter=128),
             # 'c&w': CW(c=8., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
-            'c&w': CW(c=8., kappa=0.02, steps=512, lr=1e-3),  # CR TIME !
+            'c&w': CW(c=16., kappa=0.05, steps=1024, lr=5e-3, n_restarts=8),  # CR TIME !
             'autoattack': AutoAttack()
         }
 
@@ -71,7 +71,7 @@ def load(args):
         args.attacks = {
             'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=128),
             # 'c&w': CW(c=8., kappa=0.02, steps=8192, lr=1e-3),  # SUBMISSION TIME!
-            'c&w': CW(c=12., kappa=0.02, steps=512, lr=1e-3),  # CR TIME !
+            'c&w': CW(c=24., kappa=0.02, steps=1024, lr=2e-3, n_restarts=8),  # CR TIME !
             'autoattack': AutoAttack()
         }
 

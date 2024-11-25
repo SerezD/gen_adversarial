@@ -314,7 +314,8 @@ class AutoAttack:
 
 
 class CW:
-    def __init__(self, c: float = 1., kappa: float = 0., steps: int = 64, lr: float = 1e-2):
+    def __init__(self, c: float = 1., kappa: float = 0., steps: int = 64, lr: float = 1e-2, n_restarts: int = 1,
+                 early_stopping_steps: int = 16):
         """
         cloned and adapted from https://github.com/Harry24k/adversarial-attacks-pytorch/blob/master/torchattacks/attacks/cw.py
 
@@ -322,95 +323,140 @@ class CW:
            :param kappa: also written as 'confidence'
            :param steps: number of steps
            :param lr: learning rate of the Adam optimizer.
+           :param n_restarts: can restart the iteration from a different random point to avoid falling in local minima
+           :param early_stopping_steps: how many loss values in the past to look for deciding early stopping
         """
         self.c = c
         self.kappa = kappa
         self.steps = steps
         self.lr = lr
+        self.n_restarts = n_restarts
+
+        self.early_stopping_len = early_stopping_steps
 
     # f-function in the paper
-    def f(self, preds, labels):
+    def f(self, logits, gt_label):
 
-        one_hot_labels = torch.eye(preds.shape[1], device=preds.device)[labels]
+        one_hot = nn.functional.one_hot(gt_label, logits.shape[1])
 
-        # find the max logit other than the target class
-        other = torch.max((1 - one_hot_labels) * preds, dim=1)[0]
+        real = torch.sum(one_hot * logits, 1)
+        other, _ = torch.max((1 - one_hot) * logits - one_hot * 1e4, 1)
 
-        # get the target class's logit
-        real = torch.max(one_hot_labels * preds, dim=1)[0]
-
-        return torch.clamp((real - other), min=-self.kappa)
+        f = torch.max((real - other) + self.kappa, torch.zeros_like(real))
+        return f
 
     def __call__(self, image, label, net):
         """
-       :param image: Image of size HxWx3
+       :param image: Image of shape (1x3xHxW)
        :param label: ground truth label of shape (1,)
        :param net: network (input: images, output: values of activation **BEFORE** softmax).
         """
 
-        images = image.clone().detach()
-        labels = label.clone().detach()
+        assert len(image.size()) == 4 and image.shape[0] == 1 and len(label.size()) == 1 and label.shape[0] == 1, \
+            "wrong input shapes!"
 
-        w = torch.atanh(torch.clamp(images * 2 - 1, min=-1, max=1)).detach()
-        w.requires_grad = True
+        # original image and label
+        image = image.clone().detach()
+        label = label.clone().detach()
 
-        best_adv_images = images.clone().detach()
-        best_L2 = 1e10 * torch.ones((len(images))).to(images.device)
-        prev_cost = 1e10
-        dim = len(images.shape)
+        absolute_succeed = False
+        absolute_best_adv_image = image.clone()
+        absolute_best_L2 = 0.
 
-        MSELoss = nn.MSELoss(reduction="none")
-        Flatten = nn.Flatten()
+        # initialize loss stuff
+        MSELoss = nn.MSELoss(reduction="sum")
 
-        optimizer = optim.Adam([w], lr=self.lr)
+        # adaptive c parameter based on restarts
+        c = self.c
 
-        for step in range(self.steps):
+        # FGSM for initialization, with bound adjusted on image size
+        res = np.log2(image.shape[-1])
+        initialization_step = FGSM(l2_bound=np.power(2, res-5))
 
-            # Get adversarial images
-            adv_images = 1 / 2 * (torch.tanh(w) + 1)
+        for _ in range(self.n_restarts):
 
-            # Calculate loss
-            current_L2 = MSELoss(Flatten(adv_images), Flatten(images)).sum(dim=1)
-            L2_loss = current_L2.sum()
+            # get a random adv image in the direction that increases loss
+            best_adv_image = initialization_step(image, label, net)[2]
+            noise = torch.randn_like(image)
+            noise = noise * np.power(2, res-8) / torch.norm(noise.view(1, -1), dim=1, keepdim=True)
+            best_adv_image = torch.clamp(best_adv_image + noise, min=1e-6, max=1 - 1e-6)
+            best_L2 = torch.linalg.norm((best_adv_image - image).flatten(), ord=2)
 
-            outputs = net(adv_images)
-            f_loss = self.f(outputs, labels).sum()
+            # initialize w
+            w = torch.atanh((best_adv_image * 2.) - 1)
+            w.requires_grad = True
 
-            cost = L2_loss + self.c * f_loss
+            # keep track of losses for early stopping
+            rolling_mean_loss = 0.0
+            rolling_mean_updates = 0
+            prev_succeed = False
 
-            optimizer.zero_grad()
-            cost.backward()
-            optimizer.step()
+            # optimizer
+            optimizer = optim.Adam([w], lr=self.lr)
 
-            # Update adversarial images
-            pre = torch.argmax(outputs.detach(), 1)
+            # start iterations
+            for step in range(self.steps):
 
-            # If the attack is not targeted we simply make these two values unequal
-            condition = (pre != labels).float()
+                # Get adversarial image from w
+                current_adv_image = 0.5 * (torch.tanh(w) + 1)
 
-            # Filter out images that get either correct predictions or non-decreasing loss,
-            # i.e., only images that are both misclassified and loss-decreasing are left
-            mask = condition * (best_L2 > current_L2.detach())
-            best_L2 = mask * current_L2.detach() + (1 - mask) * best_L2
+                # Calculate loss
+                L2_loss = MSELoss(current_adv_image, image)
 
-            mask = mask.view([-1] + [1] * (dim - 1))
-            best_adv_images = mask * adv_images.detach() + (1 - mask) * best_adv_images
+                logits = net(current_adv_image)
+                f_loss = self.f(logits, label)
 
-            # Early stop when loss does not converge.
-            # max(.,1) To prevent MODULO BY ZERO error in the next step.
-            if step % max(self.steps // 10, 1) == 0:
+                loss = L2_loss + c * f_loss
 
-                succeed = net(best_adv_images).argmax(dim=1) != labels
-                bound = torch.linalg.norm((best_adv_images.detach() - images.detach()).flatten(), ord=2)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_([w], max_norm=1.)
+                optimizer.step()
 
-                if cost.item() > prev_cost:
-                    return succeed, bound, best_adv_images.detach()
+                # is attack successful ?
+                pred = torch.argmax(logits.detach(), 1)
+                succeed = (pred != label).item()
 
-                prev_cost = cost.item()
+                # succeeding and not converging -> early stopping
+                if succeed:
 
-        succeed = net(best_adv_images).argmax(dim=1) != labels
-        bound = torch.linalg.norm((best_adv_images.detach() - images.detach()).flatten(), ord=2)
-        return succeed, bound, best_adv_images.detach()
+                    # check non convergence
+                    loss_item = loss.detach().item()
+                    if loss_item > rolling_mean_loss and rolling_mean_updates > self.early_stopping_len:
+                        break
+
+                    # update rolling mean
+                    lookback = min(rolling_mean_updates, self.early_stopping_len)
+                    rolling_mean_loss = (rolling_mean_loss * lookback + loss.item()) / (lookback + 1)
+                    rolling_mean_updates += 1
+
+                # update adversarial image if no candidate is found or improved L2
+                this_L2 = torch.linalg.norm((current_adv_image.detach() - image).flatten(), ord=2)
+                if not prev_succeed or best_L2 > this_L2:
+                    best_adv_image = current_adv_image.detach()
+                    best_L2 = this_L2
+                    prev_succeed = succeed
+
+            # update result if new best is found, depending on current result
+            pred = torch.argmax(net(best_adv_image).detach(), 1)
+            succeed = (pred != label).item()
+            
+            # failed at this step -> increase c
+            if not succeed:
+                c = 1.2 * c
+            # found first or better adv at this step -> update and reduce c
+            elif (succeed and not absolute_succeed) or (succeed and absolute_succeed and absolute_best_L2 > best_L2):
+                c = 0.8 * c
+                absolute_best_adv_image = best_adv_image
+                absolute_best_L2 = best_L2
+                absolute_succeed = True
+            # found worse adv at this step -> slightly reduce c
+            elif succeed and absolute_succeed and absolute_best_L2 < best_L2:
+                c = 0.9 * c
+
+            c = max(min(c, 1000), 0.1)
+
+        return absolute_succeed, absolute_best_L2, absolute_best_adv_image
 
 
 class DeepFool:
@@ -446,7 +492,7 @@ class DeepFool:
         """
         cloned and adapted from https://github.com/LTS4/DeepFool/blob/master/Python/deepfool.py
 
-           :param image: Image of size HxWx3
+           :param image: Image of size 1xHxWx3
            :param gt_label: truth label of shape (1,)
            :param net: network (input: images, output: values of activation **BEFORE** softmax).
         """
