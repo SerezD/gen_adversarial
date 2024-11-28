@@ -14,7 +14,6 @@ from src.defenses.ablations.models import GaussianNoiseDefenseModel, GaussianBlu
 from src.defenses.wrappers import EoTWrapper
 
 
-# TODO we should increase C in C&W attack to achieve perturbations with an higher value
 # TODO remove args.bounds_l2
 def load(args):
     """
@@ -33,7 +32,8 @@ def load(args):
         args.bounds_l2 = (0.5, 1.0, 2.0, 4.0)
 
         args.attacks = {
-            'deepfool': DeepFool(num_classes=2, overshoot=0.02, max_iter=128),
+            # 'deepfool': DeepFool(num_classes=2, overshoot=0.02, max_iter=128),  # SUBMISSION TIME!
+            'deepfool': DeepFool(num_classes=2, overshoot=0.01, max_iter=1024),  # CR TIME!
             # 'c&w': CW(c=16., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
             'c&w': CW(c=64., kappa=0.01, steps=1024, lr=1e-3, n_restarts=8, early_stopping_steps=32),  # CR TIME !
             'autoattack': AutoAttack()
@@ -69,7 +69,8 @@ def load(args):
         args.bounds_l2 = (0.5, 1.0, 2.0, 4.0)
 
         args.attacks = {
-            'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=128),
+            # 'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=128),# SUBMISSION TIME!
+            'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=256),  # CR TIME!
             # 'c&w': CW(c=8., kappa=0.02, steps=8192, lr=1e-3),  # SUBMISSION TIME!
             'c&w': CW(c=24., kappa=0.02, steps=1024, lr=2e-3, n_restarts=8),  # CR TIME !
             'autoattack': AutoAttack()
