@@ -4,7 +4,7 @@ import torch
 from src.classifier.model import ResNet, Vgg, ResNext
 from src.mlvgms_autoencoders.NVAE.model import AutoEncoder
 from src.mlvgms_autoencoders.StyleGan_E4E.psp import pSp
-from src.mlvgms_autoencoders.StyleGan_Trans.models.style_transformer import StyleTransformer
+from src.mlvgms_autoencoders.StyleGan_Trans_n.models.style_transformer import StyleTransformer
 
 
 def load_ResNet50(path: str, device: str, n_classes: int = 2) -> ResNet:
