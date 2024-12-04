@@ -1,26 +1,26 @@
 import argparse
 import json
-import random
 import numpy as np
-import torch.multiprocessing as mp
 import os
-from datetime import timedelta
+import random
 import torch
+
+from datetime import timedelta
 from matplotlib import pyplot as plt
+from torch import multiprocessing as mp
+from torch.cuda import synchronize
+from torch.distributed import init_process_group, destroy_process_group, barrier
 from torch.nn.functional import pad
 from torch.utils.data import DataLoader
-from torch.distributed import init_process_group, destroy_process_group, barrier
-from torch.cuda import synchronize
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.utils import make_grid
-
 from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
 from src.experiments.load_defense import load
 
 
-def pad_image(image, color, padding_size: int = 2):
+def pad_image(image: torch.Tensor, color: bool, padding_size: int = 2) -> torch.Tensor:
     """
     pad image (1, 3, h, w) on all sides
     with color red (if color is true) or green
@@ -50,7 +50,7 @@ def pad_image(image, color, padding_size: int = 2):
     return image
 
 
-def parse_args():
+def parse_args() -> args.Namespace:
 
     parser = argparse.ArgumentParser('Common Pipeline to test a given defense mechanism.')
 
@@ -103,7 +103,7 @@ def ddp_setup(rank: int, world_size: int):
     init_process_group(backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(hours=12))
 
 
-def main(rank, world_size, args):
+def main(rank: int, world_size: int, args: args.Namespace):
 
     ddp_setup(rank, world_size)
 
@@ -120,9 +120,6 @@ def main(rank, world_size, args):
     cw_distortions = torch.empty((0, 1), device=args.device)
     aa_distortions = torch.empty((0, 1), device=args.device)
 
-    # TODO REMOVE THE FOLLOWING
-    # success_rates = torch.empty((3, len(args.bounds_l2), 0), device=args.device)
-
     for idx, (images, labels) in enumerate(tqdm(dataloader)):
 
         # Ensure all processes have finished previous computations before to continue
@@ -137,10 +134,6 @@ def main(rank, world_size, args):
             preds = defense_model(images)
             clean_accuracy = torch.cat((clean_accuracy, torch.eq(preds.argmax(dim=1), labels).unsqueeze(0)), 0)
 
-            # TODO REMOVE THE FOLLOWING
-            # success_0 = torch.ne(preds.argmax(dim=1), labels)
-            # success_0 = success_0.unsqueeze(0).repeat(len(args.bounds_l2), 1)  # just copy on every bound
-
         # DEEP FOOL
         if args.attack is None or args.attack == 'deepfool':
             succeeded_df, minimum_bound_df, adversarial_df = args.attacks['deepfool'](images, labels, defense_model)
@@ -152,12 +145,6 @@ def main(rank, world_size, args):
                 df_distortions = torch.cat((df_distortions,
                                             torch.tensor([[100.]], device=args.device)))
 
-            # TODO REMOVE THE FOLLOWING
-            # success_1 = torch.zeros_like(success_0, dtype=torch.bool)
-            # for i, b in enumerate(args.bounds_l2):
-            #     if succeeded_df and minimum_bound_df <= b:
-            #         success_1[i] = True
-
         else:
             if rank == 0 and idx == 0:
                 print('Skipping DeepFool')
@@ -166,9 +153,6 @@ def main(rank, world_size, args):
             succeeded_df = False
             minimum_bound_df = 0.
             adversarial_df = images.detach().clone()
-
-            # TODO REMOVE THE FOLLOWING
-            # success_1 = torch.zeros_like(success_0, dtype=torch.bool)
 
         # C&W
         if args.attack is None or args.attack == 'c&w':
@@ -182,11 +166,6 @@ def main(rank, world_size, args):
                 cw_distortions = torch.cat((cw_distortions,
                                             torch.tensor([[100.]], device=args.device)))
 
-            # TODO REMOVE THE FOLLOWING
-            # success_2 = torch.zeros_like(success_0, dtype=torch.bool)
-            # for i, b in enumerate(args.bounds_l2):
-            #     if succeeded_cw and minimum_bound_cw <= b:
-            #         success_2[i] = True
         else:
 
             if rank == 0 and idx == 0:
@@ -196,9 +175,6 @@ def main(rank, world_size, args):
             succeeded_cw = False
             minimum_bound_cw = 0.0
             adversarial_cw = images.detach().clone()
-
-            # TODO REMOVE THE FOLLOWING
-            # success_2 = torch.zeros_like(success_0, dtype=torch.bool)
 
         # C&W
         if args.attack is None or args.attack == 'autoattack':
@@ -221,11 +197,6 @@ def main(rank, world_size, args):
             succeeded_aa = False
             minimum_bound_aa = 0.0
             adversarial_aa = images.detach().clone()
-
-        # TODO REMOVE THE FOLLOWING
-        # # cat results
-        # success_rates = torch.cat((success_rates,
-        #                            torch.stack((success_0, success_1, success_2), dim=0)), dim=2)
 
         # save visual examples of applied perturbation.
         if rank == 0 and idx % 5 == 0:
@@ -281,12 +252,6 @@ def main(rank, world_size, args):
     cw_distortions = torch.cat(gathered_cw_distortions, dim=0).squeeze(1).cpu().tolist()
     aa_distortions = torch.cat(gathered_aa_distortions, dim=0).squeeze(1).cpu().tolist()
 
-    # TODO REMOVE THE FOLLOWING
-    # gathered_success_rates = [torch.zeros_like(success_rates) for _ in range(world_size)]
-    # torch.distributed.all_gather(gathered_success_rates, success_rates)
-    # gathered_success_rates = torch.cat(gathered_success_rates, dim=1)
-    # success_rates = gathered_success_rates.mean(dim=-1)
-
     if rank == 0:
 
         json_dest_file = f'{args.results_folder}results.json'
@@ -320,13 +285,6 @@ def main(rank, world_size, args):
                 value = aa_distortions
 
             res_dict[f'{attack}'] = value
-
-            # TODO REMOVE THE FOLLOWING
-            # for b_i, bound in enumerate(args.bounds_l2):
-            #     if attack == 'Clean':
-            #         res_dict[f'{attack}'] = success_rates[a_i][b_i].item()
-            #         break
-            #     res_dict[f'{attack}_{bound}'] = success_rates[a_i][b_i].item()
 
         # write or overwrite/update
         with open(json_dest_file, 'w') as f:

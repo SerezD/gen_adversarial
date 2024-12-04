@@ -1,19 +1,24 @@
 import math
-
 import torch
+
 from kornia.filters import gaussian_blur2d
 from torch import nn
+
+"""
+Base Defense Mechanisms adding simple Gaussian Noise or Blurring to input image as purification.
+Used for Ablation purposes.
+"""
 
 
 class GaussianNoiseDefenseModel(nn.Module):
 
-    def __init__(self, base_classifier, eps=0.5):
+    def __init__(self, base_classifier: nn.Module, eps: float = 0.5):
         super().__init__()
 
         self.base_classifier = base_classifier
         self.eps = eps
 
-    def purify(self, x):
+    def purify(self, x: torch.Tensor) -> torch.Tensor:
 
         # Generate Gaussian noise with the same shape as x
         noise = torch.ones_like(x).normal_(0., 1.)
@@ -27,7 +32,7 @@ class GaussianNoiseDefenseModel(nn.Module):
         # Add the scaled noise to the original image
         return (x + scaled_noise).clamp(0., 1.)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         x_cln = self.purify(x)
 
@@ -36,12 +41,12 @@ class GaussianNoiseDefenseModel(nn.Module):
 
 class GaussianBlurDefenseModel(nn.Module):
 
-    def __init__(self, base_classifier):
+    def __init__(self, base_classifier: nn.Module):
         super().__init__()
 
         self.base_classifier = base_classifier
 
-    def purify(self, x):
+    def purify(self, x: torch.Tensor) -> torch.Tensor:
 
         b, c, h, w = x.shape
 
@@ -54,7 +59,7 @@ class GaussianBlurDefenseModel(nn.Module):
         blurred_x = gaussian_blur2d(x, kernel_size=k, sigma=(1., 1.))
         return blurred_x
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         x_cln = self.purify(x)
 

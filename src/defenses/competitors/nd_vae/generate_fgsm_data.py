@@ -1,11 +1,12 @@
 import argparse
-
 import numpy as np
-from PIL import Image
 import os
 import torch
+
+from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
 
 from data.datasets import ImageNameLabelDataset
 from src.attacks.untargeted import FGSM
@@ -15,10 +16,8 @@ device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
 def parse_args():
-    """
 
-    """
-    parser = argparse.ArgumentParser('')
+    parser = argparse.ArgumentParser('Generate adversarial images for ND VAE training')
 
     parser.add_argument('--images_folder', type=str, required=True,
                         help='Folder with training set images')

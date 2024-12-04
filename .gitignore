@@ -16,3 +16,6 @@
 /src/generate_figures/
 /.idea/modules.xml
 /.idea/other.xml
+/gen_adversarial.egg-info/
+/src/defenses/ours/sampling_test.py
+/configs_w_paths/

@@ -1,20 +1,19 @@
 import argparse
-import os
-import warnings
-import socket
-
 import kornia
+import os
 import numpy as np
-
+import socket
 import torch
-import torch.distributed as dist
-from kornia.enhance import Normalize
-from torch.backends import cudnn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
+import warnings
+
 from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop, RandomGrayscale, \
     RandomContrast, RandomEqualize, RandomBrightness
+from kornia.enhance import Normalize
+from torch import distributed as dist
+from torch.backends import cudnn
+from torch.nn.parallel import DistributedDataParallel as ddp
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
@@ -22,31 +21,30 @@ from src.classifier.model import ResNet, Vgg, ResNext
 from src.defenses.competitors.trades.modules import trades_loss
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
 
-    parser = argparse.ArgumentParser('Classifiers training')
+    parser = argparse.ArgumentParser('Classifier Fine Tuning for Adversarial Robustness with Trades')
 
-    parser.add_argument('--run_name', type=str, default='test')
+    parser.add_argument('--run_name', type=str)
     parser.add_argument('--data_path', type=str, required=True,
                         help='directory with train, validation subdirectories')
     parser.add_argument('--model_type', type=str, choices=['resnext', 'resnet', 'vgg'])
-    parser.add_argument('--n_classes', type=int, default=2)
+    parser.add_argument('--n_classes', type=int)
     parser.add_argument('--beta', type=float, help='In range 1.0, 10.0, '
                                                    'the higher means robustness is considered more than classification.')
 
     parser.add_argument('--resume_from', type=str,
                         help='pretrained model for fine tuning')
 
-    parser.add_argument('--cumulative_bs', type=int, default=8)
-    parser.add_argument('--image_size', type=int, default=256)
+    parser.add_argument('--cumulative_bs', type=int)
+    parser.add_argument('--image_size', type=int)
     parser.add_argument('--seed', type=int, default=0)
 
-    parser.add_argument('--checkpoint_base_path', type=str, default='./runs/',
+    parser.add_argument('--checkpoint_base_path', type=str,
                         help='directory where new checkpoints are saved')
 
-    parser.add_argument('--epochs', type=int, default=2)
-    parser.add_argument('--lr', type=float, default=1e-3)
-
+    parser.add_argument('--epochs', type=int)
+    parser.add_argument('--lr', type=float)
 
     args = parser.parse_args()
 
@@ -96,7 +94,8 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
+def prepare_data(world_size: int, args: argparse.Namespace) -> \
+        [DataLoader, DataLoader, AugmentationSequential, Normalize]:
 
     image_size = args.image_size
     batch_size = args.cumulative_bs // world_size
@@ -129,15 +128,7 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
 
 
 def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential, normalization_function: Normalize,
-                model: ResNet, optimizer: torch.optim.Optimizer, args: argparse.Namespace, global_step: int):
-    """
-    :param dataloader: train dataloader.
-    :param augmentations: augmentation module.
-    :param model: model in training mode. Remember to pass ".module" with DDP.
-    :param optimizer: optimizer object from torch.optim.Optimizer.
-    :param args:
-    :param global_step: for monitoring total number of steps.
-    """
+                model: ResNet, optimizer: torch.optim.Optimizer, args: argparse.Namespace, global_step: int) -> int:
 
     epoch_losses = []
 
@@ -213,7 +204,7 @@ def main(args: argparse.Namespace):
     args.log = []
 
     # Get data loaders.
-    train_loader, val_loader, train_augmentations, normalization_function = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
+    train_loader, val_loader, train_augmentations, normalization_function = prepare_data(WORLD_SIZE, args)
 
     # create model and move it to GPU with id rank
     if args.model_type == 'resnext':
@@ -245,7 +236,7 @@ def main(args: argparse.Namespace):
         args.log.append(line)
 
     # ddp model, optimizer, scheduler, scaler
-    ddp_model = DDP(model, device_ids=[LOCAL_RANK])
+    ddp_model = ddp(model, device_ids=[LOCAL_RANK])
 
     optimizer = torch.optim.SGD(ddp_model.parameters(), learning_rate, momentum=0.9)
 

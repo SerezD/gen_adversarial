@@ -1,7 +1,7 @@
-from argparse import Namespace
-
 import torch
 import yaml
+
+from argparse import Namespace
 
 from src.attacks.untargeted import DeepFool, CW, AutoAttack
 from src.defenses.competitors.a_vae.model import StyledGenerator
@@ -14,8 +14,7 @@ from src.defenses.ablations.models import GaussianNoiseDefenseModel, GaussianBlu
 from src.defenses.wrappers import EoTWrapper
 
 
-# TODO remove args.bounds_l2
-def load(args):
+def load(args: Namespace) -> [Namespace, torch.nn.Module]:
     """
     :return updated args, defense model
     """
@@ -29,13 +28,10 @@ def load(args):
 
         # attack parameters
         args.image_size = 256
-        args.bounds_l2 = (0.5, 1.0, 2.0, 4.0)
 
         args.attacks = {
-            # 'deepfool': DeepFool(num_classes=2, overshoot=0.02, max_iter=128),  # SUBMISSION TIME!
-            'deepfool': DeepFool(num_classes=2, overshoot=0.01, max_iter=1024),  # CR TIME!
-            # 'c&w': CW(c=16., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
-            'c&w': CW(c=64., kappa=0.01, steps=1024, lr=1e-3, n_restarts=8, early_stopping_steps=32),  # CR TIME !
+            'deepfool': DeepFool(num_classes=2, overshoot=0.01, max_iter=1024),
+            'c&w': CW(c=64., kappa=0.01, steps=1024, lr=1e-3, n_restarts=8, early_stopping_steps=32),
             'autoattack': AutoAttack()
         }
 
@@ -48,12 +44,10 @@ def load(args):
 
         # attack parameters
         args.image_size = 64
-        args.bounds_l2 = (0.1, 0.5, 1.0, 2.0)
 
         args.attacks = {
             'deepfool': DeepFool(num_classes=8, overshoot=0.02, max_iter=128),
-            # 'c&w': CW(c=8., kappa=0.05, steps=8192, lr=1e-3),  # SUBMISSION TIME!
-            'c&w': CW(c=16., kappa=0.05, steps=1024, lr=5e-3, n_restarts=8),  # CR TIME !
+            'c&w': CW(c=16., kappa=0.05, steps=1024, lr=5e-3, n_restarts=8),
             'autoattack': AutoAttack()
         }
 
@@ -66,13 +60,10 @@ def load(args):
 
         # attack parameters
         args.image_size = 128
-        args.bounds_l2 = (0.5, 1.0, 2.0, 4.0)
 
         args.attacks = {
-            # 'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=128),# SUBMISSION TIME!
-            'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=256),  # CR TIME!
-            # 'c&w': CW(c=8., kappa=0.02, steps=8192, lr=1e-3),  # SUBMISSION TIME!
-            'c&w': CW(c=24., kappa=0.02, steps=1024, lr=2e-3, n_restarts=8),  # CR TIME !
+            'deepfool': DeepFool(num_classes=4, overshoot=0.02, max_iter=256),
+            'c&w': CW(c=24., kappa=0.02, steps=1024, lr=2e-3, n_restarts=8),
             'autoattack': AutoAttack()
         }
 
@@ -94,7 +85,7 @@ def load(args):
 
         # apply only some gaussian noise or blur
         if d_params.type == 'noise':
-            defense_model = GaussianNoiseDefenseModel(base_classifier, args.bounds_l2[-1])
+            defense_model = GaussianNoiseDefenseModel(base_classifier, 2. if args.experiment == 'ids' else 4.)
         else:
             defense_model = GaussianBlurDefenseModel(base_classifier)
 

@@ -1,6 +1,0 @@
-classifier_path: /media/dserez/runs/adversarial/CNNs/vgg11_celeba_64_identities/best.pt
-autoencoder_path: /media/dserez/runs/adversarial/competitors/a_vae/celeba_identities/checkpoint/1400002.pt
-# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/vgg11_celeba_64_identities/best.pt
-# autoencoder_path: /home/dserez/gen_adversarial/runs/competitors/a_vae/celeba_identities/checkpoint/1400002.pt
-
-kernel_size: 2

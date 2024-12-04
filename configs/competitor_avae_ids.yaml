@@ -1,0 +1,4 @@
+classifier_path: /add/your/path
+autoencoder_path: /add/your/path
+
+kernel_size: 2

@@ -4,7 +4,9 @@ import torch
 class EoTWrapper(torch.nn.Module):
 
     def __init__(self, model: torch.nn.Module, eot_steps: int):
-
+        """
+        Simple wrapper implementing Expectation over Transformation
+        """
         super(EoTWrapper, self).__init__()
 
         self.model = model

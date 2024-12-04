@@ -1,14 +1,16 @@
 from einops import rearrange
 import torch
+
 from kornia.geometry import resize
 from torch import nn
 
-from src.defenses.loading_utils import load_ResNet50, load_Vgg11, load_ResNext50, load_NVAE, load_E4EStyleGan, load_TranStyleGan
-from src.defenses.ours.abstract_models import BaseClassificationModel, HLDefenseModel
-from src.hl_autoencoders.NVAE.modules.distributions import DiscMixLogistic, Normal
+from src.defenses.loading_utils import (load_ResNet50, load_Vgg11, load_ResNext50, load_NVAE, load_E4EStyleGan,
+                                        load_TranStyleGan)
+from src.defenses.ours.abstract_models import BaseClassificationModel, MLVGMDefenseModel
+from src.mlvgms_autoencoders.NVAE.modules.distributions import DiscMixLogistic, Normal
 
 """
-Contains all the models for defense, including BaseClassificationModels and HLDefenseModels
+Contains all the models for defense, including BaseClassificationModels and MLVGMDefenseModels
 """
 
 
@@ -75,7 +77,7 @@ class CarsTypeClassifier(BaseClassificationModel, torch.nn.Module):
         return load_ResNext50(model_path, device)
 
 
-class E4EStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
+class E4EStyleGanDefenseModel(MLVGMDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str,
                  interpolation_alphas: tuple, alpha_attenuation: float = 1.0,
@@ -93,7 +95,7 @@ class E4EStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
-        custom method to load the pretrained HL autoencoder.
+        custom method to load the pretrained MLVGM autoencoder.
         :param model_path: absolute path to the pretrained model.
         :param device: cuda device (or cpu) to load the model on
         :return: nn.Module of the pretrained autoencoder
@@ -102,7 +104,7 @@ class E4EStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def purify(self, batch: torch.Tensor) -> torch.Tensor:
         """
-        HL encoding procedure to extract the codes.
+        MLVGM encoding procedure to extract the codes.
         :param batch: pre-processed images of shape (B, C, H, W).
         :return: post_precessed purified reconstructions (B, C, H, W)
         """
@@ -130,7 +132,7 @@ class E4EStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
         return reconstructions
 
 
-class NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
+class NVAEDefenseModel(MLVGMDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str,
                  interpolation_alphas: tuple, alpha_attenuation: float = 1.0, initial_noise_eps: float = 0.0,
@@ -148,7 +150,7 @@ class NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
-        custom method to load the pretrained HL autoencoder.
+        custom method to load the pretrained MLVGM autoencoder.
         :param model_path: absolute path to the pretrained model.
         :param device: cuda device (or cpu) to load the model on
         :return: nn.Module of the pretrained autoencoder
@@ -157,7 +159,7 @@ class NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def purify(self, batch: torch.Tensor) -> torch.Tensor:
         """
-        HL encoding procedure to extract the codes.
+        MLVGM encoding procedure to extract the codes.
         :param batch: pre-processed images of shape (B, C, H, W).
         :return: post_precessed purified reconstructions (B, C, H, W)
         """
@@ -272,14 +274,12 @@ class NVAEDefenseModel(HLDefenseModel, torch.nn.Module):
         return self.autoencoder.denormalization(reconstructions)
 
 
-class TransStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
+class TransStyleGanDefenseModel(MLVGMDefenseModel, torch.nn.Module):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str,
                  interpolation_alphas: tuple, alpha_attenuation: float = 1.0,
                  initial_noise_eps: float = 0.0, apply_gaussian_blur: bool = False,
                  device: str = 'cpu'):
-        """
-        """
 
         mean = (0.5, 0.5, 0.5)
         std = (0.5, 0.5, 0.5)
@@ -289,7 +289,7 @@ class TransStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def load_autoencoder(self, model_path: str, device: str) -> nn.Module:
         """
-        custom method to load the pretrained HL autoencoder.
+        custom method to load the pretrained MLVGM autoencoder.
         :param model_path: absolute path to the pretrained model.
         :param device: cuda device (or cpu) to load the model on
         :return: nn.Module of the pretrained autoencoder
@@ -298,9 +298,8 @@ class TransStyleGanDefenseModel(HLDefenseModel, torch.nn.Module):
 
     def purify(self, x: torch.Tensor) -> torch.Tensor:
         """
-        HL encoding procedure to extract the codes.
-        :param batch: pre-processed images of shape (B, C, H, W).
-        :param cars: if true expects 128 128 input, first upsample to 256 and removes padding
+        MLVGM encoding procedure to extract the codes.
+        :param x: pre-processed images of shape (B, C, H, W).
         :return: post_precessed purified reconstructions (B, C, H, W)
         """
 

@@ -18,10 +18,10 @@ class ResNet(nn.Module):
         # build a 3-layer projector
         prev_dim = self.model.fc.weight.shape[1]
         self.model.fc = nn.Sequential(
-                            nn.Linear(prev_dim, prev_dim, bias=False), # first layer
+                            nn.Linear(prev_dim, prev_dim, bias=False),
                             nn.BatchNorm1d(prev_dim),
                             nn.ReLU(inplace=True),
-                            nn.Linear(prev_dim, n_classes))  # output layer
+                            nn.Linear(prev_dim, n_classes))
 
     def forward(self, x: Tensor) -> Tensor:
 
@@ -39,10 +39,10 @@ class Vgg(nn.Module):
         # build a 3-layer projector
         prev_dim = self.model.classifier[0].weight.shape[1]
         self.model.classifier = nn.Sequential(
-                            nn.Linear(prev_dim, prev_dim, bias=False), # first layer
+                            nn.Linear(prev_dim, prev_dim, bias=False),
                             nn.BatchNorm1d(prev_dim),
                             nn.ReLU(inplace=True),
-                            nn.Linear(prev_dim, n_classes))  # output layer
+                            nn.Linear(prev_dim, n_classes))
 
     def forward(self, x: Tensor) -> Tensor:
 
@@ -60,10 +60,10 @@ class ResNext(nn.Module):
         # build a 3-layer projector
         prev_dim = self.model.fc.weight.shape[1]
         self.model.fc = nn.Sequential(
-                            nn.Linear(prev_dim, prev_dim, bias=False), # first layer
+                            nn.Linear(prev_dim, prev_dim, bias=False),
                             nn.BatchNorm1d(prev_dim),
                             nn.ReLU(inplace=True),
-                            nn.Linear(prev_dim, n_classes))  # output layer
+                            nn.Linear(prev_dim, n_classes))
 
     def forward(self, x: Tensor) -> Tensor:
 

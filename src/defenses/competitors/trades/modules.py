@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 import torch.optim as optim
+from torch.autograd import Variable
 
 # https://github.com/yaodongyu/TRADES/blob/master/trades.py
+
 
 def squared_l2_norm(x):
     flattened = x.view(x.unsqueeze(0).shape[0], -1)
@@ -24,7 +25,7 @@ def trades_loss(model,
                 perturb_steps=10,
                 beta=1.0,
                 distance='l_inf',
-                normalization_function= lambda x: x):
+                normalization_function=lambda x: x):
 
     # define KL-loss
     criterion_kl = nn.KLDivLoss(reduction='sum')

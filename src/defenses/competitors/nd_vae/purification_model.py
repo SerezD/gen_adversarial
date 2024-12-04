@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+
 from src.defenses.competitors.nd_vae.modules.models.NVAE_utils import DiscMixLogistic
 
 
@@ -13,7 +14,7 @@ class NDVaeDefenseModel(nn.Module):
 
         self.noise_std = noise_std
 
-    def purify(self, x):
+    def purify(self, x: torch.Tensor) -> torch.Tensor:
 
         # add gaussian noise
         x = x + torch.randn_like(x) * self.noise_std
@@ -23,7 +24,7 @@ class NDVaeDefenseModel(nn.Module):
         x_cln = DiscMixLogistic(logits).mean()
         return x_cln
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         x_cln = self.purify(x)
         preds = self.base_classifier(x_cln)

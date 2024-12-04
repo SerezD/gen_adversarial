@@ -1,8 +1,10 @@
-import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+import argparse
 import math
 import numpy as np
+import torch
+
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
 from src.defenses.ours.models import CelebaGenderClassifier, CelebaIdentityClassifier, CarsTypeClassifier, \
@@ -10,17 +12,17 @@ from src.defenses.ours.models import CelebaGenderClassifier, CelebaIdentityClass
 from src.defenses.wrappers import EoTWrapper
 
 
-def get_linear_alphas(n: int):
+def get_linear_alphas(n: int) -> list:
 
     return [i / n for i in range(1, n + 1)]
 
 
-def get_cosine_alphas(n: int):
+def get_cosine_alphas(n: int) -> list:
 
     return [0.5 * (1 - math.cos(math.pi * (i / n))) for i in range(1, n + 1)]
 
 
-def get_best_combination(folder: str):
+def get_best_combination(folder: str) -> np.array:
 
     alphas = np.load(f'{folder}/alphas.npy')
     accuracies = np.load(f'{folder}/accuracies.npy')[:, 0]
@@ -28,7 +30,7 @@ def get_best_combination(folder: str):
 
 
 class AlphaEvaluator:
-    def __init__(self, args, device):
+    def __init__(self, args: argparse.Namespace, device: int):
 
         self.device = device
         self.eot_steps = 32
@@ -77,7 +79,7 @@ class AlphaEvaluator:
         self.dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     @torch.no_grad()
-    def objective_function(self, alphas):
+    def objective_function(self, alphas: tocrch.Tensor) -> float:
         """
         One Epoch of Defense Model with given alphas on the pre-computed adversarial set
         """
@@ -97,17 +99,5 @@ class AlphaEvaluator:
 
             accuracy = torch.cat((accuracy, torch.eq(preds, y)), dim=0)
 
-            # if idx == 32:
-            #     break
-
         accuracy = torch.mean(accuracy.to(torch.float32)).item()
         return accuracy
-
-
-if __name__ == '__main__':
-
-    # print([float(f'{a:.3f}') for a in get_linear_alphas(16)])
-    # print([float(f'{a:.3f}') for a in get_cosine_alphas(16)])
-
-    fd = '/media/dserez/runs/adversarial/alpha_learning/E4E_StyleGAN_resnet-50/bayesian_optimization'
-    print([float(f'{a:.3f}') for a in get_best_combination(fd)])

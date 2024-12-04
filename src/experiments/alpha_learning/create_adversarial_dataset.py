@@ -1,9 +1,9 @@
 import argparse
-
 import numpy as np
-from PIL import Image
 import os
 import torch
+
+from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -16,11 +16,8 @@ from src.defenses.wrappers import EoTWrapper
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
-def parse_args():
-    """
-
-    """
-    parser = argparse.ArgumentParser('')
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser('Create Adversarial Dataset for Learning Alphas')
 
     parser.add_argument('--images_folder', type=str, required=True,
                         help='Folder with images to make adversarial')

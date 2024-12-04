@@ -1,6 +1,0 @@
-classifier_path: /media/dserez/runs/adversarial/CNNs/resnext50_cars_128_types/best.pt
-autoencoder_path: /media/dserez/runs/adversarial/competitors/a_vae/cars128/checkpoint/352002.pt
-# classifier_path: /home/dserez/gen_adversarial/runs/CNNs/resnext50_cars_128_types/best.pt
-# autoencoder_path: /home/dserez/gen_adversarial/runs/competitors/a_vae/cars128/checkpoint/352002.pt
-
-kernel_size: 4

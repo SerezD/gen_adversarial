@@ -1,15 +1,14 @@
 import argparse
 import os
-
 import numpy as np
 import torch
 
 from src.experiments.alpha_learning.common_utils import AlphaEvaluator
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
 
-    parser = argparse.ArgumentParser('Load an HL purification model and compute some alphas')
+    parser = argparse.ArgumentParser('Load an MLVGM purification model and compute some alphas')
 
     parser.add_argument('--adv_images_path', type=str, required=True,
                         help='Precomputed adversaries to use for evaluation')

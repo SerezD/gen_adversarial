@@ -1,17 +1,16 @@
 import argparse
 import math
 import os
-
-from tqdm import tqdm
-
 import torch
+
 from torch import nn, optim
-from torch.nn import functional as F
 from torch.autograd import grad
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, utils
+from tqdm import tqdm
 
-from model import StyledGenerator, Discriminator
+from src.defenses.competitors.a_vae.model import StyledGenerator, Discriminator
 
 
 def requires_grad(model, flag=True):

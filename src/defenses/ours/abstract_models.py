@@ -44,7 +44,7 @@ class BaseClassificationModel(ABC):
         """
         pass
 
-    def set_device(self, device: str) -> None:
+    def set_device(self, device: str):
         """
         :param device: device to move the classifier on
         """
@@ -62,7 +62,7 @@ class BaseClassificationModel(ABC):
         return self.classifier(batch)
 
 
-class HLDefenseModel(ABC):
+class MLVGMDefenseModel(ABC):
 
     def __init__(self, classifier: BaseClassificationModel, autoencoder_path: str,
                  interpolation_alphas: tuple, alpha_attenuation: float = 1.0,
@@ -126,7 +126,7 @@ class HLDefenseModel(ABC):
         """
         pass
 
-    def add_gaussian_noise(self, x: torch.Tensor):
+    def add_gaussian_noise(self, x: torch.Tensor) -> torch.Tensor:
 
         # Generate Gaussian noise with the same shape as x
         noise = torch.ones_like(x).normal_(0., 1.)
@@ -142,7 +142,7 @@ class HLDefenseModel(ABC):
 
         return x_noisy
 
-    def apply_gaussian_blur(self, x: torch.Tensor):
+    def apply_gaussian_blur(self, x: torch.Tensor) -> torch.Tensor:
 
         if not self.blur_input:
             return x
@@ -158,7 +158,8 @@ class HLDefenseModel(ABC):
         blurred_x = gaussian_blur2d(x, kernel_size=k, sigma=(1., 1.))
         return blurred_x
 
-    def __call__(self, batch: torch.Tensor, preds_only: bool = True) -> list:
+    def __call__(self, batch: torch.Tensor, preds_only: bool = True) \
+            -> Union[torch.Tensor, [torch.Tensor, torch.Tensor]]:
         """
         :param batch: image tensor of shape (B C H W)
         :return if preds only:
@@ -172,7 +173,7 @@ class HLDefenseModel(ABC):
         batch = self.apply_gaussian_blur(batch)
         batch = self.add_gaussian_noise(batch)
 
-        # preprocessing before autoencoding
+        # preprocessing before auto-encoding
         if self.preprocess:
             batch = normalize(batch, self.mean, self.std)
 

@@ -1,10 +1,29 @@
 
-## TODO BEFORE RELEASE
+# Pre-trained Multiple Latent Variable Generative Models are good defenders against Adversarial Attacks
 
-1. check all TODOs (e.g. remove default argument from every ArgParse)
-2. check environment file and remove unused packages
-3. create makefile (flake8 black mypy)
-4. remove sampling_test.py
-5. write readme
-6. add licences for generators
-7. remove OLD_preliminary_tests.zip
+This is the official github repo for the paper: Pre-trained Multiple Latent Variable Generative Models are good defenders against Adversarial Attacks  
+Accepted at WACV 2025
+
+## INSTALLATION
+
+## MLVGMS REFERENCES
+
+## COMPETITORS REFERENCES
+
+### ADVERSARIAL-VAE
+
+paper: https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123750290.pdf
+github: https://github.com/nercms-mmap/A-VAE/tree/main
+
+Why of Interest: starts with a similar premises on "class" and "adversarial" information. 
+
+### ND-VAE
+
+## OBTAIN DATASETS
+
+## OBTAIN PRE-TRAINED MODELS
+
+## RUN EXPERIMENTS
+
+## CITATION
+

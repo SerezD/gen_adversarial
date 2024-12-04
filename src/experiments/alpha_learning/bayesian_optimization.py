@@ -1,20 +1,20 @@
 import argparse
-import os
-
 import numpy as np
+import os
 import torch
-from botorch.models import SingleTaskGP
-from botorch.fit import fit_gpytorch_mll
+
 from botorch.acquisition import ExpectedImprovement
-from botorch.optim import optimize_acqf
+from botorch.fit import fit_gpytorch_mll
 from gpytorch.mlls import ExactMarginalLogLikelihood
+from botorch.models import SingleTaskGP
+from botorch.optim import optimize_acqf
 
 from src.experiments.alpha_learning.common_utils import AlphaEvaluator, get_linear_alphas, get_cosine_alphas
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
 
-    parser = argparse.ArgumentParser('Load an HL purification model and learn best alphas')
+    parser = argparse.ArgumentParser('Load an MLVGM purification model and learn best alphas')
 
     parser.add_argument('--adv_images_path', type=str, required=True,
                         help='Precomputed adversaries to use for evaluation')
@@ -47,7 +47,7 @@ def parse_args():
     return args
 
 
-def main(args):
+def main(args: argparse.Namespace):
 
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 

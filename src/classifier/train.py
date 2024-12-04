@@ -1,45 +1,45 @@
 import argparse
-import os
-import warnings
-import socket
-
 import numpy as np
-
+import os
+import socket
 import torch
-import torch.distributed as dist
-from kornia.enhance import Normalize
-from torch.backends import cudnn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from pytorch_model_summary import summary
+import warnings
+
+from argparse import Namespace
 from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomResizedCrop, RandomGrayscale, \
     RandomContrast, RandomEqualize, RandomBrightness
+from kornia.enhance import Normalize
+from pytorch_model_summary import summary
+from torch import distributed as dist
+from torch.backends import cudnn
+from torch.nn.parallel import DistributedDataParallel as ddp
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from data.datasets import ImageLabelDataset
 from src.classifier.model import ResNet, Vgg, ResNext
 
 
-def parse_args():
+def parse_args() -> Namespace:
 
     parser = argparse.ArgumentParser('Classifiers training')
 
-    parser.add_argument('--run_name', type=str, default='test')
+    parser.add_argument('--run_name', type=str)
     parser.add_argument('--data_path', type=str, required=True,
                         help='directory with train, validation subdirectories')
     parser.add_argument('--model_type', type=str, choices=['resnext', 'resnet', 'vgg'])
-    parser.add_argument('--n_classes', type=int, default=2)
+    parser.add_argument('--n_classes', type=int)
 
-    parser.add_argument('--cumulative_bs', type=int, default=8)
-    parser.add_argument('--image_size', type=int, default=256)
+    parser.add_argument('--cumulative_bs', type=int)
+    parser.add_argument('--image_size', type=int)
     parser.add_argument('--seed', type=int, default=0)
 
-    parser.add_argument('--checkpoint_base_path', type=str, default='./runs/',
-                        help='directory where checkpoints are saved')
+    parser.add_argument('--checkpoint_base_path', type=str,
+                        help='directory where checkpoints will be saved')
 
-    parser.add_argument('--epochs', type=int, default=2)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--epochs', type=int)
+    parser.add_argument('--lr', type=float)
 
     parser.add_argument('--resume_from', type=str, default=None,
                         help='if specified, resume training from this checkpoint')
@@ -92,7 +92,10 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
+def prepare_data(world_size: int, args: Namespace) -> [DataLoader, DataLoader, AugmentationSequential, Normalize]:
+    """
+    Create train and validation dataloaders and augmentation pipelines using kornia
+    """
 
     image_size = args.image_size
     batch_size = args.cumulative_bs // world_size
@@ -110,12 +113,6 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
         train_dataloader = DataLoader(t_dataset, batch_size=batch_size, shuffle=True)
         val_dataloader = DataLoader(v_dataset, batch_size=batch_size, shuffle=False)
 
-    # train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
-    #                                              RandomResizedCrop(size=(image_size, image_size),
-    #                                                                scale=(0.85, 1.0)),
-    #                                              RandomGrayscale(p=0.2),
-    #                                              Normalize(mean=0.5, std=0.5),
-    #                                              same_on_batch=False)
     train_augmentations = AugmentationSequential(RandomHorizontalFlip(p=0.5),
                                                  RandomResizedCrop(size=(image_size, image_size),
                                                                    scale=(0.75, 1.0)),
@@ -137,15 +134,7 @@ def prepare_data(rank: int, world_size: int, args: argparse.Namespace):
 
 
 def epoch_train(dataloader: DataLoader, augmentations: AugmentationSequential,
-                model: ResNet, optimizer: torch.optim.Optimizer, args: argparse.Namespace, global_step: int):
-    """
-    :param dataloader: train dataloader.
-    :param augmentations: augmentation module.
-    :param model: model in training mode. Remember to pass ".module" with DDP.
-    :param optimizer: optimizer object from torch.optim.Optimizer.
-    :param args:
-    :param global_step: for monitoring total number of steps.
-    """
+                model: ResNet, optimizer: torch.optim.Optimizer, args: Namespace, global_step: int) -> int:
 
     epoch_losses = []
 
@@ -216,7 +205,7 @@ def main(args: argparse.Namespace):
     args.log = []
 
     # Get data loaders.
-    train_loader, val_loader, train_augmentations, val_augmentations = prepare_data(LOCAL_RANK, WORLD_SIZE, args)
+    train_loader, val_loader, train_augmentations, val_augmentations = prepare_data(WORLD_SIZE, args)
 
     # create model and move it to GPU with id rank
     if args.model_type == 'resnext':
@@ -225,6 +214,8 @@ def main(args: argparse.Namespace):
         model = ResNet(n_classes=args.n_classes).to(LOCAL_RANK)
     elif args.model_type == 'vgg':
         model = Vgg(n_classes=args.n_classes).to(LOCAL_RANK)
+    else:
+        raise AttributeError(f'{args.model_type} is not supported.')
 
     # load checkpoint if resume
     if args.resume_from is not None:
@@ -263,7 +254,7 @@ def main(args: argparse.Namespace):
         args.log.append(line)
 
     # ddp model, optimizer, scheduler, scaler
-    ddp_model = DDP(model, device_ids=[LOCAL_RANK])
+    ddp_model = ddp(model, device_ids=[LOCAL_RANK])
 
     optimizer = torch.optim.SGD(ddp_model.parameters(), learning_rate, momentum=0.9)
 

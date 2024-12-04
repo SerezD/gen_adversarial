@@ -13,13 +13,13 @@ class AVaeDefenseModel(nn.Module):
         self.transform = lambda x: (x * 2) - 1
         self.anti_transform = lambda x: (x + 1) / 2
 
-    def purify(self, x):
+    def purify(self, x: torch.Tensor) -> torch.Tensor:
         x = nn.functional.avg_pool2d(self.transform(x), self.kernel_size)
         x_cln = self.purifier(x, inference=True)
         x_cln = self.anti_transform(x_cln)
         return x_cln
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_cln = self.purify(x)
         preds = self.base_classifier(x_cln)
         return preds

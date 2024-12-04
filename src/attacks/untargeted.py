@@ -1,5 +1,5 @@
+from abc import ABC, abstractmethod
 import collections
-import math
 
 import numpy as np
 from torch import nn, optim
@@ -7,26 +7,35 @@ from torch.autograd import Variable
 import torch as torch
 import copy
 
-# TODO CREATE ABSTRACT ATTACK With CALL method.
+from src.attacks.utils import normalize, l2_norm, projection_l2
 
 
-def l2_norm(x: torch.Tensor, keepdim=False):
+class UntargetedL2Attack(ABC):
+    def __init__(self, ):
+        super().__init__()
 
-    z = (x ** 2).view(-1).sum().sqrt()
-    if keepdim:
-        z = z.view(1, 1, 1, 1)
-    return z
+    @abstractmethod
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
+        """
+
+        Abstract method for Untargeted L2 attacks.
+
+        :param image: Image of size 1, 3, H, W
+        :param gt_label: ground truth label of shape (1,)
+        :param net: network to attack (input: images, output: logits -> values of activation **BEFORE** softmax).
+
+        Returns:
+            Tuple[bool, float, torch.Tensor]:
+                - success (bool): Whether the attack was successful.
+                - l2_bound (float): The L2 distance of the perturbation.
+                - adv_image (torch.Tensor): The adversarial image generated.
+        """
+        pass
 
 
-def normalize(x: torch.Tensor):
-    """
-    :param x: tensor to normalize
-    :return: L2 normalized tensor
-    """
-    return x / l2_norm(x)
+class APGDAttack(UntargetedL2Attack):
 
-
-class APGDAttack:
     def __init__(self, n_iter: int, rho: float, max_bound: float, ce_loss: bool):
         """
             Implementation of APGD-CE and APGD-DLR attack
@@ -38,6 +47,8 @@ class APGDAttack:
             :param max_bound: maximum allowed L2 bound to deem the perturbation successful
             :param ce_loss: whether to use CE (cross entropy) loss or DLR (Difference of Logits Ratio) loss
         """
+
+        super().__init__()
 
         self.n_iter = n_iter
         self.rho = rho
@@ -56,7 +67,7 @@ class APGDAttack:
         self.min_step_size_iters = max(int(0.06 * n_iter), 1)
         self.step_size_decr = max(int(0.03 * n_iter), 1)
 
-    def check_loss_oscillation(self, all_losses: torch.Tensor, step: int, lookback: int):
+    def check_loss_oscillation(self, all_losses: torch.Tensor, step: int, lookback: int) -> bool:
         """
         :param all_losses: all loss values from all iters
         :param step: current step of iterations
@@ -75,7 +86,7 @@ class APGDAttack:
         # if loss is not increasing anymore, then the attack is loosing effectiveness!
         return n_loss_incr < lookback * self.rho
 
-    def dlr_loss(self, logits: torch.Tensor, gt_label: torch.Tensor):
+    def dlr_loss(self, logits: torch.Tensor, gt_label: torch.Tensor) -> torch.Tensor:
         """
         :param logits: prediction logits, with shape (1, N_Classes)
         :param gt_label: ground truth label of shape (1,)
@@ -113,12 +124,8 @@ class APGDAttack:
 
         return numerator / denominator
 
-    def __call__(self, image, gt_label, net):
-        """
-           :param image: Image of size 1, 3, H, W
-           :param gt_label: ground truth label of shape (1,)
-           :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
-        """
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
 
         device = image.device
 
@@ -221,7 +228,6 @@ class APGDAttack:
                     prev_best_loss = best_loss
 
                     if reduce_step_size:
-
                         # halve step size and restart from best result.
                         step_size /= 2.0
                         x_adv = x_best.clone()
@@ -237,7 +243,7 @@ class APGDAttack:
         return succeed, bound, x_adv.detach()
 
 
-class AutoAttack:
+class AutoAttack(UntargetedL2Attack):
     def __init__(self):
         """
         Implementation of AutoAttack
@@ -245,8 +251,11 @@ class AutoAttack:
         uses l2-bound and untargeted setup.
         """
 
-        # three attacks to test in sequence (Square Attack is not tested)
-        # we use different bounds for apgd, since we are interested in minimizing it
+        super().__init__()
+
+        # This is a customized version where:
+        #   three attacks are tested in sequence (Square Attack is not tested)
+        #   we use different bounds for apgd, since we are interested in minimizing it
         self.apgd_ce1 = APGDAttack(n_iter=64, rho=0.75, max_bound=0.5, ce_loss=True)
         self.apgd_ce2 = APGDAttack(n_iter=64, rho=0.75, max_bound=1.0, ce_loss=True)
         self.apgd_ce3 = APGDAttack(n_iter=64, rho=0.75, max_bound=4.0, ce_loss=True)
@@ -255,14 +264,14 @@ class AutoAttack:
         self.apgd_dlr3 = APGDAttack(n_iter=64, rho=0.75, max_bound=4.0, ce_loss=False)
         self.fab = FABAttack(n_iter=128, alpha_max=0.1, eta=1.05, beta=0.9)
 
-    def __call__(self, image, gt_label, net):
-        """
-           :param image: Image of size 1, 3, H, W
-           :param gt_label: ground truth label of shape (1,)
-           :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
-        """
-        def update_result(s_0, b_0, a_0, s_1, b_1, a_1):
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
 
+        def update_result(s_0: bool, b_0: float, a_0: torch.Tensor, s_1: bool, b_1: float, a_1: torch.Tensor) \
+                -> [bool, float, torch.Tensor]:
+            """
+            Update result if new best is found
+            """
             if s_1 and not s_0:
                 return s_1, b_1, a_1
             elif s_1 and s_0:
@@ -313,11 +322,12 @@ class AutoAttack:
         return success, best_bound, best_adv
 
 
-class CW:
+class CW(UntargetedL2Attack):
     def __init__(self, c: float = 1., kappa: float = 0., steps: int = 64, lr: float = 1e-2, n_restarts: int = 1,
                  early_stopping_steps: int = 16):
         """
-        cloned and adapted from https://github.com/Harry24k/adversarial-attacks-pytorch/blob/master/torchattacks/attacks/cw.py
+        cloned and adapted from
+        https://github.com/Harry24k/adversarial-attacks-pytorch/blob/master/torchattacks/attacks/cw.py
 
            :param c: parameter for box-constraint
            :param kappa: also written as 'confidence'
@@ -326,6 +336,9 @@ class CW:
            :param n_restarts: can restart the iteration from a different random point to avoid falling in local minima
            :param early_stopping_steps: how many loss values in the past to look for deciding early stopping
         """
+
+        super().__init__()
+
         self.c = c
         self.kappa = kappa
         self.steps = steps
@@ -334,8 +347,10 @@ class CW:
 
         self.early_stopping_len = early_stopping_steps
 
-    # f-function in the paper
-    def f(self, logits, gt_label):
+    def f(self, logits: torch.Tensor, gt_label: torch.Tensor) -> torch.Tensor:
+        """
+        f-function in the paper
+        """
 
         one_hot = nn.functional.one_hot(gt_label, logits.shape[1])
 
@@ -345,19 +360,12 @@ class CW:
         f = torch.max((real - other) + self.kappa, torch.zeros_like(real))
         return f
 
-    def __call__(self, image, label, net):
-        """
-       :param image: Image of shape (1x3xHxW)
-       :param label: ground truth label of shape (1,)
-       :param net: network (input: images, output: values of activation **BEFORE** softmax).
-        """
-
-        assert len(image.size()) == 4 and image.shape[0] == 1 and len(label.size()) == 1 and label.shape[0] == 1, \
-            "wrong input shapes!"
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
 
         # original image and label
         image = image.clone().detach()
-        label = label.clone().detach()
+        label = gt_label.clone().detach()
 
         absolute_succeed = False
         absolute_best_adv_image = image.clone()
@@ -371,14 +379,14 @@ class CW:
 
         # FGSM for initialization, with bound adjusted on image size
         res = np.log2(image.shape[-1])
-        initialization_step = FGSM(l2_bound=np.power(2, res-5))
+        initialization_step = FGSM(l2_bound=np.power(2, res - 5))
 
         for _ in range(self.n_restarts):
 
             # get a random adv image in the direction that increases loss
             best_adv_image = initialization_step(image, label, net)[2]
             noise = torch.randn_like(image)
-            noise = noise * np.power(2, res-8) / torch.norm(noise.view(1, -1), dim=1, keepdim=True)
+            noise = noise * np.power(2, res - 8) / torch.norm(noise.view(1, -1), dim=1, keepdim=True)
             best_adv_image = torch.clamp(best_adv_image + noise, min=1e-6, max=1 - 1e-6)
             best_L2 = torch.linalg.norm((best_adv_image - image).flatten(), ord=2)
 
@@ -440,7 +448,7 @@ class CW:
             # update result if new best is found, depending on current result
             pred = torch.argmax(net(best_adv_image).detach(), 1)
             succeed = (pred != label).item()
-            
+
             # failed at this step -> increase c
             if not succeed:
                 c = 1.2 * c
@@ -459,7 +467,7 @@ class CW:
         return absolute_succeed, absolute_best_L2, absolute_best_adv_image
 
 
-class DeepFool:
+class DeepFool(UntargetedL2Attack):
 
     def __init__(self, num_classes=10, overshoot=0.02, max_iter=50):
         """
@@ -471,15 +479,18 @@ class DeepFool:
            :return: success (T/F) - minimal perturbation found - adversarial image
         """
 
+        super().__init__()
+
         self.num_classes = num_classes
         self.overshoot = overshoot
         self.max_iter = max_iter
 
-    def zero_gradients(self, x):
+    def zero_gradients(self, x: torch.Tensor or collections.abc.Iterable):
         """
         this has been removed from pytorch 1.9.0
         https://discuss.pytorch.org/t/from-torch-autograd-gradcheck-import-zero-gradients/127462/2
         """
+
         if isinstance(x, torch.Tensor):
             if x.grad is not None:
                 x.grad.detach_()
@@ -488,20 +499,14 @@ class DeepFool:
             for elem in x:
                 self.zero_gradients(elem)
 
-    def __call__(self, image, gt_label, net):
-        """
-        cloned and adapted from https://github.com/LTS4/DeepFool/blob/master/Python/deepfool.py
-
-           :param image: Image of size 1xHxWx3
-           :param gt_label: truth label of shape (1,)
-           :param net: network (input: images, output: values of activation **BEFORE** softmax).
-        """
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
 
         f_image = net(Variable(image, requires_grad=True)).data.cpu().numpy().flatten()
-        I = (np.array(f_image)).flatten().argsort()[::-1]
+        identity = (np.array(f_image)).flatten().argsort()[::-1]
 
-        I = I[0:self.num_classes]
-        label = I[0]
+        identity = identity[0:self.num_classes]
+        label = identity[0]
 
         if gt_label != label:
             # no need to attack a wrong prediction!
@@ -521,20 +526,20 @@ class DeepFool:
         while k_i == label and loop_i < self.max_iter:
 
             pert = np.inf
-            fs[0, I[0]].backward(retain_graph=True)
+            fs[0, identity[0]].backward(retain_graph=True)
             grad_orig = x.grad.data.cpu().numpy().copy()
 
             for k in range(1, self.num_classes):
                 self.zero_gradients(x)
 
-                fs[0, I[k]].backward(retain_graph=True)
+                fs[0, identity[k]].backward(retain_graph=True)
                 cur_grad = x.grad.data.cpu().numpy().copy()
 
                 # set new w_k and new f_k
                 w_k = cur_grad - grad_orig
-                f_k = (fs[0, I[k]] - fs[0, I[0]]).data.cpu().numpy()
+                f_k = (fs[0, identity[k]] - fs[0, identity[0]]).data.cpu().numpy()
 
-                pert_k = abs(f_k)/np.linalg.norm(w_k.flatten())
+                pert_k = abs(f_k) / np.linalg.norm(w_k.flatten())
 
                 # determine which w_k to use
                 if pert_k < pert:
@@ -543,10 +548,10 @@ class DeepFool:
 
             # compute r_i and r_tot
             # Added 1e-4 for numerical stability
-            r_i = (pert+1e-4) * w / np.linalg.norm(w)
+            r_i = (pert + 1e-4) * w / np.linalg.norm(w)
             r_tot = np.float32(r_tot + r_i)
 
-            pert_image = image + (1+self.overshoot)*torch.from_numpy(r_tot).to(image.device)
+            pert_image = image + (1 + self.overshoot) * torch.from_numpy(r_tot).to(image.device)
 
             x = Variable(pert_image, requires_grad=True)
             fs = net(x)
@@ -554,7 +559,7 @@ class DeepFool:
 
             loop_i += 1
 
-        r_tot = (1+self.overshoot)*r_tot
+        r_tot = (1 + self.overshoot) * r_tot
 
         # check if succeed or not
         if k_i == gt_label:
@@ -563,7 +568,7 @@ class DeepFool:
         return True, np.linalg.norm(r_tot.flatten(), 2), pert_image.detach()
 
 
-class FABAttack:
+class FABAttack(UntargetedL2Attack):
     def __init__(self, n_iter: int, alpha_max: float, eta: float, beta: bool):
         """
             Implementation of FAB attack
@@ -576,26 +581,35 @@ class FABAttack:
             :param beta: backward step
         """
 
+        super().__init__()
+
         self.n_iter = n_iter
         self.eta = eta
         self.beta = beta
         self.alpha_max = alpha_max
 
-    def get_diff_logits_grads(self, image: torch.Tensor, label: torch.Tensor, net: torch.nn.Module):
+    def zero_gradients(self, x: torch.Tensor or collections.abc.Iterable):
+        """
+        this has been removed from pytorch 1.9.0
+        https://discuss.pytorch.org/t/from-torch-autograd-gradcheck-import-zero-gradients/127462/2
+        """
+
+        if isinstance(x, torch.Tensor):
+            if x.grad is not None:
+                x.grad.detach_()
+                x.grad.zero_()
+        elif isinstance(x, collections.abc.Iterable):
+            for elem in x:
+                self.zero_gradients(elem)
+
+    def get_diff_logits_grads(self, image: torch.Tensor, label: torch.Tensor, net: torch.nn.Module) \
+            -> [torch.Tensor, torch.Tensor]:
         """
         Compute the gradients of the logit difference
         :param image: shape (1, 3, H, W)
         :param label: shape (1, )
         :param net: classifier with logits output
         """
-        def zero_gradients(x):
-            if isinstance(x, torch.Tensor):
-                if x.grad is not None:
-                    x.grad.detach_()
-                    x.grad.zero_()
-            elif isinstance(x, collections.abc.Iterable):
-                for elem in x:
-                    zero_gradients(elem)
 
         image = image.clone().requires_grad_()
         with torch.enable_grad():
@@ -606,7 +620,7 @@ class FABAttack:
         g2 = torch.zeros([n_classes, *image.size()], device=image.device)
         grad_mask = torch.zeros_like(y)
         for i in range(n_classes):
-            zero_gradients(image)
+            self.zero_gradients(image)
             grad_mask[:, i] = 1.0
             y.backward(grad_mask, retain_graph=True)
             grad_mask[:, i] = 0.0
@@ -620,69 +634,9 @@ class FABAttack:
 
         return df, dg
 
-    def projection_l2(self, points_to_project, w_hyperplane, b_hyperplane):
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
 
-        device = points_to_project.device
-        t, w, b = points_to_project, w_hyperplane.clone(), b_hyperplane
-
-        c = (w * t).sum(dim=1) - b[:, 0]
-        ind2 = 2 * (c >= 0) - 1
-        w.mul_(ind2.unsqueeze(1))
-        c.mul_(ind2)
-
-        r = torch.max(t / w, (t - 1) / w).clamp(min=-1e12, max=1e12)
-        r.masked_fill_(w.abs() < 1e-8, 1e12)
-        r[r == -1e12] *= -1
-        rs, indr = torch.sort(r, dim=1)
-        rs2 = torch.nn.functional.pad(rs[:, 1:], (0, 1))
-        rs.masked_fill_(rs == 1e12, 0)
-        rs2.masked_fill_(rs2 == 1e12, 0)
-
-        w3s = (w ** 2).gather(1, indr)
-        w5 = w3s.sum(dim=1, keepdim=True)
-        ws = w5 - torch.cumsum(w3s, dim=1)
-        d = -(r * w)
-        d.mul_((w.abs() > 1e-8).float())
-        s = torch.cat((-w5 * rs[:, 0:1], torch.cumsum((-rs2 + rs) * ws, dim=1) - w5 * rs[:, 0:1]), 1)
-
-        c4 = s[:, 0] + c < 0
-        c3 = (d * w).sum(dim=1) + c > 0
-        c2 = ~(c4 | c3)
-
-        lb = torch.zeros(c2.sum(), device=device)
-        ub = torch.full_like(lb, w.shape[1] - 1)
-        nitermax = math.ceil(math.log2(w.shape[1]))
-
-        s_, c_ = s[c2], c[c2]
-        for counter in range(nitermax):
-            counter4 = torch.floor((lb + ub) / 2)
-            counter2 = counter4.long().unsqueeze(1)
-            c3 = s_.gather(1, counter2).squeeze(1) + c_ > 0
-            lb = torch.where(c3, counter4, lb)
-            ub = torch.where(c3, ub, counter4)
-
-        lb = lb.long()
-
-        if c4.any():
-            alpha = c[c4] / w5[c4].squeeze(-1)
-            d[c4] = -alpha.unsqueeze(-1) * w[c4]
-
-        if c2.any():
-            alpha = (s[c2, lb] + c[c2]) / ws[c2, lb] + rs[c2, lb]
-            alpha[ws[c2, lb] == 0] = 0
-            c5 = (alpha.unsqueeze(-1) > r[c2]).float()
-            d[c2] = d[c2] * c5 - alpha.unsqueeze(-1) * w[c2] * (1 - c5)
-
-        return d * (w.abs() > 1e-8).float()
-
-    def __call__(self, image, gt_label, net):
-        """
-           :param image: Image of size 1, 3, H, W
-           :param gt_label: ground truth label of shape (1,)
-           :param net: network (input: images, output: logits -> values of activation **BEFORE** softmax).
-        """
-
-        device = image.device
         image = image.detach().clone()
 
         # check pred
@@ -716,7 +670,7 @@ class FABAttack:
                 w = dg2.view([1, -1])
 
                 # these are both projections
-                d3 = self.projection_l2(
+                d3 = projection_l2(
                     torch.cat((x_i.view(1, -1), x_orig_flat), 0),
                     torch.cat((w, w), 0),
                     torch.cat((b, b), 0))
@@ -751,26 +705,28 @@ class FABAttack:
         return succeed, bound, x_adv.detach()
 
 
-class FGSM:
+class FGSM(UntargetedL2Attack):
+
     def __init__(self, l2_bound: float):
         """
         cloned and adapted from https://github.com/1Konny/FGSM/blob/master/adversary.py
         """
+
+        super().__init__()
+
         self.l2_bound = l2_bound
 
-    def __call__(self, image, label, net):
-        """
-        Returns:
-            succeed (T/F) - minimal perturbation found - adversarial image
-        """
+    def __call__(self, image: torch.Tensor, gt_label: torch.Tensor, net: torch.nn.Module) \
+            -> [bool, float, torch.Tensor]:
+
         x_adv = Variable(image.data, requires_grad=True)
         h_adv = net(x_adv)
 
         # check if pred is correct.
-        if torch.argmax(h_adv, dim=-1) != label:
+        if torch.argmax(h_adv, dim=-1) != gt_label:
             return True, 0.0, image
 
-        cost = -torch.nn.functional.cross_entropy(h_adv, label)
+        cost = -torch.nn.functional.cross_entropy(h_adv, gt_label)
 
         net.zero_grad()
         if x_adv.grad is not None:
@@ -791,4 +747,4 @@ class FGSM:
         # check prediction
         h_adv = net(x_adv)
 
-        return torch.argmax(h_adv, dim=-1) != label, self.l2_bound, x_adv.detach()
+        return torch.argmax(h_adv, dim=-1) != gt_label, self.l2_bound, x_adv.detach()

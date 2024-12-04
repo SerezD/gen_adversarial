@@ -1,0 +1,10 @@
+classifier_path: /add/your/path
+autoencoder_path: /add/your/path
+
+noise_std: 0.1
+x_channels: 3
+pre_proc_groups: 2
+encoding_channels: 16
+scales: 2
+groups: 2
+cells: 4
