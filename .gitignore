@@ -2,6 +2,7 @@
 /gen_adversarial.egg-info/dependency_links.txt
 /.idea/gen_adversarial.iml
 /.idea/misc.xml
+/.idea/
 /gen_adversarial.egg-info/PKG-INFO
 /.idea/inspectionProfiles/profiles_settings.xml
 /.idea/inspectionProfiles/Project_Default.xml
@@ -19,3 +20,4 @@
 /gen_adversarial.egg-info/
 /src/defenses/ours/sampling_test.py
 /configs_w_paths/
+/.idea/.gitignore
