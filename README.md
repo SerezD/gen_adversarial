@@ -4,6 +4,7 @@
 This is the official github repo for the paper: Pre-trained Multiple Latent Variable Generative Models are good defenders against Adversarial Attacks (Accepted at WACV 2025)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![arXiv](https://img.shields.io/badge/arXiv-2412.03453-red)](https://arxiv.org/abs/2412.03453)
 
 ## INSTALLATION
 
