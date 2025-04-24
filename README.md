@@ -5,6 +5,7 @@ This is the official github repo for the paper: Pre-trained Multiple Latent Vari
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![arXiv](https://img.shields.io/badge/arXiv-2412.03453-red)](https://arxiv.org/abs/2412.03453)
+[![WACV](https://img.shields.io/badge/WACV-2025-blue)](https://openaccess.thecvf.com/content/WACV2025/html/Serez_Pre-Trained_Multiple_Latent_Variable_Generative_Models_are_Good_Defenders_Against_WACV_2025_paper.html)
 
 ## INSTALLATION
 
@@ -217,10 +218,11 @@ A success rate of 100 indicates that no adversarial image has been found.
 
 ```
 @inproceedings{serez2025pretrained,
-  title={Pre-trained Multiple Latent Variable Generative Models are good defenders
-against Adversarial Attacks},
-  author={Serez, Dario and Cristani, Marco and Del Bue, Alessio and Murino, Vittorio and Morerio, Pietro},
-  booktitle=WACV,
-  year={2025},
+    author    = {Serez, Dario and Cristani, Marco and Del Bue, Alessio and Murino, Vittorio and Morerio, Pietro},
+    title     = {Pre-Trained Multiple Latent Variable Generative Models are Good Defenders Against Adversarial Attacks},
+    booktitle = {Proceedings of the Winter Conference on Applications of Computer Vision (WACV)},
+    month     = {February},
+    year      = {2025},
+    pages     = {6506-6516}
 }
 ```
